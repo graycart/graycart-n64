@@ -1,0 +1,15 @@
+# Local / non-vendored artifacts (never commit dumps)
+carts/
+*.z64
+*.n64
+*.v64
+*.sra
+*.eep
+*.fla
+*.sav
+# Firmware dumps (not research markdown)
+/pif*.bin
+/**/pif*.bin
+/**/cic*.bin
+/**/ipl*.bin
+/target/
