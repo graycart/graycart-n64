@@ -7,7 +7,9 @@ carts/
 *.eep
 *.fla
 *.sav
-pif*.bin
-cic*
-ipl*.bin
+# Firmware dumps (not research markdown)
+/pif*.bin
+/**/pif*.bin
+/**/cic*.bin
+/**/ipl*.bin
 /target/
