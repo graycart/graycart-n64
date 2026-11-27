@@ -32,12 +32,12 @@ mod tests;
 
 use serde::{Deserialize, Serialize};
 
-pub use bus::{Bus, CacheAttr, PhysRegion, Rdram};
+pub use bus::{Bus, CacheAttr, IsViewer, PhysRegion, Rdram};
 pub use cart::{Cart, CicType, RomError, RomFormat, RomHeader};
 pub use cpu::{CpuBackend, InterpCpu};
-pub use rdp::{CpuRdpLle, RdpBackend};
+pub use rdp::{CpuRdpLle, RdpBackend, RdpSyncKind};
 pub use rsp::{InterpRsp, RspBackend};
-pub use schedule::{EventKind, Scheduler};
+pub use schedule::{CountClock, EventKind, ScheduledEvent, Scheduler};
 pub use trap::Trap;
 
 /// Tier 2 opt-in enhancement settings (reserved for M11).
