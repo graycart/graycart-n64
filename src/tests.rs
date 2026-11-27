@@ -384,3 +384,73 @@ fn m4_rsp_vector_program_lqv_vadd_sqv_end_to_end() {
         assert_eq!(got, exp, "lane {i} mismatch");
     }
 }
+
+/// M5.0 seam: DPC START/END/XBUS persist on the same `Bus.rdp`, and SyncFull's
+/// `RaiseDpIntr` is visible as `MI_INTR_DP` (masked until `MI_INTR_MASK` enables it).
+///
+/// `RdpBackend::sync` drops [`crate::rdp::RdpAction`]. Bus applies `RaiseDpIntr`
+/// only when a DPC/DPS MMIO write returns it, and no register write does that yet,
+/// so this test mirrors that Bus arm after `combine_blend::sync_full`.
+#[test]
+fn m5_0_bus_rdp_persistent_mmio_and_syncfull_mi_intr_dp() {
+    use crate::mi::MI_INTR_DP;
+    use crate::rdp::{combine_blend, RdpAction};
+
+    let mut core = N64Core::new(N64Config::accurate());
+
+    core.bus
+        .write_u32(0x0410_0000, 0x0010_0000, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0410_0004, 0x0010_0040, CacheAttr::Uncached)
+        .unwrap();
+
+    assert_eq!(
+        core.bus.read_u32(0x0410_0000, CacheAttr::Uncached).unwrap(),
+        0x0010_0000
+    );
+    assert_eq!(
+        core.bus.read_u32(0x0410_0004, CacheAttr::Uncached).unwrap(),
+        0x0010_0040
+    );
+    assert_eq!(core.bus.rdp.dpc_start, 0x0010_0000);
+    assert_eq!(core.bus.rdp.dpc_end, 0x0010_0040);
+    assert_eq!(
+        core.bus.rdp.read_cmd_reg(0x00).unwrap(),
+        core.bus.rdp.dpc_start
+    );
+    assert_eq!(
+        core.bus.rdp.read_cmd_reg(0x04).unwrap(),
+        core.bus.rdp.dpc_end
+    );
+
+    // DPC_STATUS write bit 1 sets XBUS DMEM DMA (read bit 0).
+    core.bus
+        .write_u32(0x0410_000C, 1 << 1, CacheAttr::Uncached)
+        .unwrap();
+    assert_ne!(
+        core.bus.read_u32(0x0410_000C, CacheAttr::Uncached).unwrap()
+            & CpuRdpLle::STATUS_XBUS_DMEM_DMA,
+        0
+    );
+    assert_ne!(core.bus.rdp.dpc_status & CpuRdpLle::STATUS_XBUS_DMEM_DMA, 0);
+
+    let action = combine_blend::sync_full(&mut core.bus.rdp, &mut core.bus.rdram).unwrap();
+    assert_eq!(action, RdpAction::RaiseDpIntr);
+    if action == RdpAction::RaiseDpIntr {
+        core.bus.mi.set_intr(MI_INTR_DP);
+    }
+
+    assert_eq!(core.bus.mi.intr & MI_INTR_DP, MI_INTR_DP);
+    assert_eq!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_DP,
+        MI_INTR_DP
+    );
+    assert!(!core.bus.mi.irq_pending());
+
+    // MI_INTR_MASK set-DP is write bit 11 (line index 5).
+    core.bus
+        .write_u32(0x0430_000C, 1 << 11, CacheAttr::Uncached)
+        .unwrap();
+    assert!(core.bus.mi.irq_pending());
+}

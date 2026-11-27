@@ -44,9 +44,9 @@ Before writing code or spawning subagents, every session MUST execute:
 ## 4. Orchestrator + Maximally Parallel Cheap Sub-Agent Playbook
 
 Per Dave's explicit directive:
-- **Orchestrator Role ("The Boss"):** The top-level agent acts strictly as Orchestrator. Design thin interface seams, fan out implementation across **maximally parallel subagents using the cheapest capable model (`Model: "flash_lite"`)**, enforce **strictly disjoint file scopes** per worker so parallel workers never collide, perform **line-by-line hardware-spec diff review** on every worker's changes before merging, run the full validation + fixture gates, update `STATUS.md`, and report a **Progress Board + copy-paste Windows PowerShell commands** after every wave/milestone.
-- **When to use `flash_lite` vs. Orchestrator Model:**
-  - `flash_lite`: Parallel well-scoped implementation tasks (single opcode families, peripheral register blocks, unit test suites, docs, mechanical refactors).
+- **Orchestrator Role ("The Boss"):** The top-level agent acts strictly as Orchestrator. Design thin interface seams, fan out implementation across **maximally parallel subagents using the default worker model (`Model: "grok-4.7-high"`)**, enforce **strictly disjoint file scopes** per worker so parallel workers never collide, perform **line-by-line hardware-spec diff review** on every worker's changes before merging, run the full validation + fixture gates, update `STATUS.md`, and report a **Progress Board + copy-paste Windows PowerShell commands** after every wave/milestone.
+- **When to use `grok-4.7-high` vs. Orchestrator Model:**
+  - `grok-4.7-high`: Parallel well-scoped implementation tasks (single opcode families, peripheral register blocks, unit test suites, docs, mechanical refactors).
   - Orchestrator Model: Seam design, subtle hardware debugging, final diff audit, integration wiring, release verification.
 
 ### Reusable Sub-Agent Brief Template

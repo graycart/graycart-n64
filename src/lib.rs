@@ -117,7 +117,6 @@ pub struct N64Core {
     pub scheduler: Scheduler,
     pub cpu: InterpCpu,
     pub rsp: InterpRsp,
-    pub rdp: CpuRdpLle,
     pub bus: Bus,
 }
 
@@ -133,7 +132,6 @@ impl N64Core {
             scheduler,
             cpu: InterpCpu::new(),
             rsp: InterpRsp::new(),
-            rdp: CpuRdpLle::new(),
             bus,
         }
     }
@@ -161,6 +159,7 @@ impl N64Core {
         self.cpu.reset();
         self.rsp.reset();
         self.bus.sp.reset();
+        self.bus.rdp.reset();
         self.bus.pif.seed_boot_ram(cic);
         self.bus.pending_events.clear();
         self.bus.pending_pi_len = 0;

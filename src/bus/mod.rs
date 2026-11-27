@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::{Ai, AiAction};
 use crate::cart::Cart;
-use crate::mi::{Mi, MI_INTR_AI, MI_INTR_PI, MI_INTR_SI, MI_INTR_SP, MI_INTR_VI};
+use crate::mi::{Mi, MI_INTR_AI, MI_INTR_DP, MI_INTR_PI, MI_INTR_SI, MI_INTR_SP, MI_INTR_VI};
 use crate::pi::{Pi, PiAction};
 use crate::pif::Pif;
-use crate::rdp::CpuRdpLle;
+use crate::rdp::{CpuRdpLle, RdpAction};
 use crate::ri::Ri;
 use crate::rsp::{Sp, SpAction, DMEM_SIZE, IMEM_SIZE};
 use crate::schedule::EventKind;
@@ -139,6 +139,8 @@ pub struct Bus {
     pub sp_imem: Vec<u8>,
     /// RSP (SP) MMIO registers and 2D DMA state (`0x0404_0000..=0x040B_FFFF`).
     pub sp: Sp,
+    /// RDP DPC/DPS MMIO (`0x0410_0000` / `0x0420_0000`). Single source of truth.
+    pub rdp: CpuRdpLle,
     pub mi: Mi,
     pub vi: Vi,
     pub ai: Ai,
@@ -164,6 +166,7 @@ impl Bus {
             sp_dmem: vec![0; DMEM_SIZE],
             sp_imem: vec![0; IMEM_SIZE],
             sp: Sp::new(),
+            rdp: CpuRdpLle::new(),
             mi: Mi::new(),
             vi: Vi::new(),
             ai: Ai::new(),
@@ -449,8 +452,8 @@ impl Bus {
             PhysRegion::PiRegs => self.pi.read_reg(pa & 0xFFFF),
             PhysRegion::RiRegs => self.ri.read_reg(pa & 0xFFFF),
             PhysRegion::SiRegs => self.si.read_reg(pa & 0xFFFF),
-            PhysRegion::RdpCmdRegs => CpuRdpLle::new().read_cmd_reg(pa & 0xFFFF),
-            PhysRegion::RdpSpanRegs => CpuRdpLle::new().read_span_reg(pa & 0xFFFF),
+            PhysRegion::RdpCmdRegs => self.rdp.read_cmd_reg(pa & 0xFFFF),
+            PhysRegion::RdpSpanRegs => self.rdp.read_span_reg(pa & 0xFFFF),
             PhysRegion::IsViewer => Ok(self.isviewer.read_u32(pa - ISVIEWER_BASE)),
             PhysRegion::CartRom => {
                 let offset = (pa - 0x1000_0000) as usize;
@@ -618,8 +621,20 @@ impl Bus {
                 }
                 Ok(())
             }
-            PhysRegion::RdpCmdRegs => CpuRdpLle::new().write_cmd_reg(pa & 0xFFFF, val),
-            PhysRegion::RdpSpanRegs => CpuRdpLle::new().write_span_reg(pa & 0xFFFF, val),
+            PhysRegion::RdpCmdRegs => {
+                match self.rdp.write_cmd_reg_action(pa & 0xFFFF, val)? {
+                    RdpAction::RaiseDpIntr => self.mi.set_intr(MI_INTR_DP),
+                    RdpAction::None => {}
+                }
+                Ok(())
+            }
+            PhysRegion::RdpSpanRegs => {
+                match self.rdp.write_span_reg_action(pa & 0xFFFF, val)? {
+                    RdpAction::RaiseDpIntr => self.mi.set_intr(MI_INTR_DP),
+                    RdpAction::None => {}
+                }
+                Ok(())
+            }
             PhysRegion::IsViewer => {
                 self.isviewer.write_u32(pa - ISVIEWER_BASE, val);
                 Ok(())

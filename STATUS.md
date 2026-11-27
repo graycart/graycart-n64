@@ -5,8 +5,8 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 ## Active Milestone
 
-- **Current:** `M4 — RSP vector unit` receipts complete on `feat/m1-cpu` (ready for Dave's review & M5 Bespoke Software LLE RDP `CpuRdpLle` + VI kickoff)
-- **Branch / HEAD:** `feat/m1-cpu` (local feature branch, 5 commits ahead of `origin/main` `28a507a`, not yet pushed/PR'd)
+- **Current:** `M5.0 — Bus.rdp seam` receipt recorded on `feat/m1-cpu` — **seam validation-green** (not full M5). Final gate **179 passed** (**172** library + **3** CLI smoke + **4** ROM harness), **0 failed**, **5 ignored**. Dillonb **26/26**. Local carts **7/8** at 2M cycles. TMEM / raster / combiner / VI RGBA8888 still next. M4 RSP vector receipts remain ready for Dave's review.
+- **Branch / HEAD:** `feat/m1-cpu` (local feature branch, 7 commits ahead of `origin/main` `28a507a` including this M5.0 receipt commit, not yet pushed/PR'd)
 - **Bespoke Vulkan Compute LLE RDP Name:** **`EdgeWalker`** (zero third-party RDP forks/FFI)
 - **Debugger & UI Standard:** [`docs/13-debugger-and-ui-architecture.md`](./docs/13-debugger-and-ui-architecture.md) (Departure Mono + `btop`-inspired Machine Monitor with live CPU/Memory/GPU/Audio graphs matching `graycart-gb` & `graycart-gba`)
 - **Pre-code gate:** Accepted by Dave on 2026-11-27
@@ -14,20 +14,21 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 ## Session Handoff Snapshot (For Fresh Agent Sessions)
 
 - **Workspace & OS:** Windows (PowerShell 5.1; use `; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }` instead of `&&`). `graycart-n64` is a git submodule under the parent `graycart` repo (`.git` points to `../.git/modules/graycart-n64`). Always set `$env:RUST_MIN_STACK = "16777216"` for `cargo test`.
-- **Governance & Execution Model:** Follow [`AGENTS.md`](./AGENTS.md) strictly. The top-level agent acts strictly as **Orchestrator ("the boss")**: design thin interface seams, fan out implementation across **maximally parallel `flash_lite` subagents** on strictly disjoint files, audit every worker diff line-by-line against hardware specs before merging, run all verification gates, update `STATUS.md`, and report a **Progress Board + runnable PowerShell commands** after every milestone.
+- **Governance & Execution Model:** Follow [`AGENTS.md`](./AGENTS.md) strictly. The top-level agent acts strictly as **Orchestrator ("the boss")**: design thin interface seams, fan out implementation across **maximally parallel `grok-4.7-high` subagents** on strictly disjoint files, audit every worker diff line-by-line against hardware specs before merging, run all verification gates, update `STATUS.md`, and report a **Progress Board + runnable PowerShell commands** after every milestone.
 - **Commits on `feat/m1-cpu` (since `main` `28a507a`):**
   1. `e47f185` — M1.0 seam + Wave A VR4300 integer ISA (5 parallel `flash_lite` workers)
   2. `c7ba46b` — M1.B0 seam + Wave B COP0/Exceptions, 32-entry TLB, COP1 FPU, L1 Caches (4 parallel `flash_lite` workers)
   3. `c7ffeaa` — M2 MI/RI/PI/SI/PIF-HLE/VI/AI peripherals, DMA/IRQ scheduler, VR4300 `SRA`/`SRAV` 64-bit hardware quirk fix, **26/26 Dillonb PASS** (4 parallel `flash_lite` workers)
   4. `c3b5b15` — M3 RSP Scalar Unit, SP MMIO + 2D skip/count DMA, exact `2/3` RCP scheduling, and upgraded [`AGENTS.md`](./AGENTS.md) parallel playbook (3 parallel `flash_lite` workers)
   5. `724663c` — M4 RSP Vector Unit (`LWC2`/`SWC2` + 8×8 transpose, 22 arith/MAC ops w/ 48-bit acc, 17 compare/clip/logic ops, `MFC2`/`MTC2`/`CFC2`/`CTC2`, zero-float integer 512-entry `RCP`/`RSQ` ROMs; 4 parallel `flash_lite` workers)
+  6. `48b4cd3` — M0–M4 session handoff snapshot and M5 parallel kickoff blueprint
 - **Already-Fetched Local Fixtures (gitignored, never commit):**
   - `tests/fixtures/fetched/dillonb/` (26 standard `.z64` ROMs)
   - `tests/fixtures/fetched/dillonb-simpleboot/` (26 `*_simpleboot.z64` ROMs — **26/26 PASS in ~5s `--release`**)
   - `tests/fixtures/fetched/n64memtest/n64memtest.z64` (v0.9)
   - Local commercial smoke ROMs live outside the submodule in `..\carts\n64` (**8 `.z64` carts**, local-only, NEVER commit; `probe_local_carts` runs 2M cycles in ~0.4s `--release` with 7/8 running cleanly and Mario Kart 64 hitting clean `N64DD_REGS 0x0508` presence-probe trap).
-- **Next Milestone Ready to Kick Off (`M5 — Bespoke Software LLE RDP CpuRdpLle + VI Scanout`):**
-  - Orchestrator M5.0 seam: move `CpuRdpLle` onto `Bus` (`pub rdp: CpuRdpLle`) as single source of truth for `0x0410_0000..=0x042F_FFFF` (DPC/DPS regs + XBUS DMEM / RDRAM ring-buffer DMA + `MI_INTR_DP` on `SyncFull`), then dispatch **4 parallel `flash_lite` workers** on disjoint files:
+- **M5.0 Bus.rdp seam final gate (`M5 — Bespoke Software LLE RDP CpuRdpLle + VI Scanout`):** worker model `grok-4.7-high`. RDP state lives only on `Bus.rdp` (orphaned throwaway `CpuRdpLle::new()` / `N64Core.rdp` removed). `RaiseDpIntr` → `MI_INTR_DP`. End-to-end `m5_0_bus_rdp_persistent_mmio_and_syncfull_mi_intr_dp` passing; **18** RDP unit tests passing. Final gate: **179 passed** = **172** library + **3** CLI smoke + **4** ROM harness; **0 failed**; **5 ignored** (default roms matrix stubs). Dillonb **26/26 PASS | 0 FAIL | 0 TRAP | 0 TIMEOUT**. Local carts **7/8** clean at 2M cycles; Mario Kart 64 same clean `N64DD_REGS` presence-probe trap at offset `0x0508`. Hygiene clean (no forbidden binaries). Zero failures; zero Orchestrator code fixes during the final gate. `regs_tests`: offset `0x20` is the `DPC_START` mirror via `& 0x1F`; unknown-offset trap uses `0x02`. This is a seam receipt only — full M5 (TMEM / raster / combiner / VI RGBA8888) is still next and is **not** Done.
+  - Orchestrator M5.0 seam: `CpuRdpLle` on `Bus` (`pub rdp: CpuRdpLle`) as single source of truth for `0x0410_0000..=0x042F_FFFF` (DPC/DPS regs + XBUS DMEM / RDRAM ring-buffer DMA + `MI_INTR_DP` on `SyncFull`). Planned disjoint files:
     1. `src/rdp/regs.rs` + `regs_tests.rs` — DPC/DPS MMIO regs, 10-bit paired `DPC_STATUS`, command FIFO decoder & dispatch.
     2. `src/rdp/tmem.rs` + `tmem_tests.rs` — 4 KiB TMEM + `SetTile`/`SetTileSize`/`LoadTile`/`LoadBlock`/`LoadTlut` + texel sampler.
     3. `src/rdp/raster.rs` + `raster_tests.rs` — Edge-walker triangle rasterizer, `FillRectangle`, `TextureRectangle`/`Flip`, scissor clip, color/Z-buffer + 9th-bit coverage R/W.
@@ -42,7 +43,7 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | **M2 — Bus + boot** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | MI/RI/PI/SI/PIF-HLE/VI/AI registers & scheduled DMA/IRQ wired; **26/26 Dillonb PASS**; **8/8 local commercial carts running 200k cycles with 0 traps** |
 | **M3 — RSP scalar + DMA** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | SP MMIO + 2D skip/count DMA + full 32-bit RSP Scalar Unit + `BREAK`/`COP0` + exact 2/3 RCP scheduling; **26/26 Dillonb PASS**; **7/8 local commercial carts running 2,000,000 cycles cleanly** |
 | **M4 — RSP vector unit** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | 160 passed (153 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; full 32×128-bit VU (`LWC2`/`SWC2` + 8×8 transpose, 22 arith/MAC ops w/ 48-bit acc, 17 compare/clip/logic ops, `MFC2`/`MTC2`/`CFC2`/`CTC2`, zero-float integer `RCP`/`RSQ` 512-entry ROMs); **26/26 Dillonb PASS** |
-| **M5 — Bespoke Software LLE RDP (`CpuRdpLle`) + VI** | Next | — |
+| **M5 — Bespoke Software LLE RDP (`CpuRdpLle`) + VI** | In progress (M5.0 Bus.rdp seam receipt recorded; full M5 not Done) | Seam only: **179 passed** (**172** lib + **3** CLI smoke + **4** ROM harness), **0 failed**, **5 ignored**; Dillonb **26/26 PASS**; local carts **7/8** at 2M (MK64 `N64DD_REGS` `0x0508`); hygiene clean; **18** RDP unit tests. TMEM/raster/combiner/VI RGBA8888 still next |
 | **M6 — Bespoke Vulkan Compute LLE RDP (`EdgeWalker`)** | Not started | — |
 | **M7 — Audio (AI + RSP mixer)** | Not started | — |
 | **M8 — PIF/Joybus/Saves/4-port Transfer Pak** | Not started | — |
@@ -52,6 +53,19 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | **M12 — Optional dynarec + Family API extract** | Not started | — |
 
 ## Receipts
+
+### M5.0 — Bus.rdp seam (`feat/m1-cpu`, 2026-11-27)
+
+Seam receipt only. Full M5 (TMEM / raster / combiner / VI RGBA8888) is still next; M5 is **not** Done.
+
+- **Worker model:** `grok-4.7-high`
+- **Seam:** RDP state lives only on `Bus.rdp`. Orphaned throwaway `CpuRdpLle::new()` and `N64Core.rdp` removed. `RaiseDpIntr` → `MI_INTR_DP`.
+- **Tests:** e2e `m5_0_bus_rdp_persistent_mmio_and_syncfull_mi_intr_dp` passing; **18** RDP unit tests passing.
+- **`regs_tests`:** offset `0x20` is the `DPC_START` mirror (`& 0x1F`); the unknown-offset trap uses `0x02`.
+- **Final gate** (Windows PowerShell, `RUST_MIN_STACK=16777216`): `cargo fmt` ok; clippy `-D warnings` ok; `cargo test` → **179 passed** = **172** library + **3** CLI smoke + **4** ROM harness; **0 failed**; **5 ignored** (default roms matrix stubs). Zero failures; zero Orchestrator code fixes during the final gate.
+- **Dillonb:** `cargo test --release --test roms matrix_dillonb_all_26 -- --ignored --nocapture` → **26/26 PASS | 0 FAIL | 0 TRAP | 0 TIMEOUT**.
+- **Local carts:** `probe_local_carts` at 2M cycles → **7/8** clean; Mario Kart 64 same clean `N64DD_REGS` presence-probe trap at offset `0x0508`.
+- **Hygiene:** clean (no forbidden binaries tracked).
 
 ### M4 — RSP Vector Unit (COP2 / LWC2 / SWC2) (`feat/m1-cpu`, 2026-11-27)
 
