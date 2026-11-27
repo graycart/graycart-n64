@@ -63,3 +63,181 @@ fn unimplemented_cpu_step_traps_instead_of_stubbing() {
         }
     ));
 }
+
+/// Build a minimal valid `.z64` cart whose entry (`0x8000_0400`) spins on an idle `BEQ r0, r0, -1` loop.
+fn make_idle_cart() -> Cart {
+    let mut rom = vec![0u8; 0x2000];
+    rom[0..4].copy_from_slice(&[0x80, 0x37, 0x12, 0x40]);
+    rom[0x08..0x0C].copy_from_slice(&0x8000_0400u32.to_be_bytes());
+    // 0x1000_FFFF = BEQ r0, r0, -1 (followed by NOP delay slot 0x0000_0000)
+    rom[0x1000..0x1004].copy_from_slice(&0x1000_FFFFu32.to_be_bytes());
+    // Known DMA payload at cart offset 0x1800 (PA 0x1000_1800)
+    rom[0x1800..0x1808].copy_from_slice(&0xCAFE_BABE_1234_5678u64.to_be_bytes());
+    Cart::from_bytes(&rom).expect("valid synthetic .z64")
+}
+
+#[test]
+fn m2_pi_dma_immediate_data_and_delayed_mi_interrupt() {
+    use crate::mi::MI_INTR_PI;
+    use crate::pi::Pi;
+
+    let mut cfg = N64Config::accurate();
+    cfg.soft_boot = true;
+    let mut core = N64Core::with_cart(make_idle_cart(), cfg);
+    // Enable MI_INTR_MASK.PI (bit 9 = set PI mask) so MI IRQ propagates to COP0.Cause.IP2.
+    core.bus
+        .write_u32(0x0430_000C, 1 << 9, CacheAttr::Uncached)
+        .unwrap();
+
+    // Start 8-byte PI DMA: Cart 0x1000_1800 -> RDRAM 0x0000_2000.
+    core.bus
+        .write_u32(0x0460_0000, 0x0000_2000, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0460_0004, 0x1000_1800, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0460_000C, 7, CacheAttr::Uncached)
+        .unwrap();
+
+    // Immediate-data contract: payload is already readable in RDRAM while DMA_BUSY is set.
+    assert_eq!(
+        core.bus.read_u64(0x0000_2000, CacheAttr::Uncached),
+        Ok(0xCAFE_BABE_1234_5678)
+    );
+    assert_ne!(
+        core.bus.read_u32(0x0460_0010, CacheAttr::Uncached).unwrap() & Pi::DMA_BUSY,
+        0
+    );
+    assert_eq!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_PI,
+        0
+    );
+
+    // Run enough cycles for PiDmaComplete (len=8 -> 72 cycles).
+    assert!(matches!(core.run_cycles(200), RunOutcome::Completed { .. }));
+    assert_eq!(
+        core.bus.read_u32(0x0460_0010, CacheAttr::Uncached).unwrap() & Pi::DMA_BUSY,
+        0
+    );
+    assert_ne!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_PI,
+        0
+    );
+    assert_ne!(core.cpu.cop0.cause & (1 << 10), 0);
+
+    // Clear PI interrupt via PI_STATUS write bit 1.
+    core.bus
+        .write_u32(0x0460_0010, 0x02, CacheAttr::Uncached)
+        .unwrap();
+    assert_eq!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_PI,
+        0
+    );
+}
+
+#[test]
+fn m2_si_dma_pif_joybus_roundtrip() {
+    use crate::mi::MI_INTR_SI;
+    use crate::si::Si;
+
+    let mut cfg = N64Config::accurate();
+    cfg.soft_boot = true;
+    let mut core = N64Core::with_cart(make_idle_cart(), cfg);
+
+    // Prepare 64-byte Joybus command frame at RDRAM 0x0000_3000:
+    // Port 0: tx=1, rx=3, cmd=0x00 (Info); followed by 0xFE end marker; byte 63 = 0x01.
+    let mut frame = [0u8; 64];
+    frame[0] = 0x01;
+    frame[1] = 0x03;
+    frame[2] = 0x00;
+    frame[6] = 0xFE;
+    frame[63] = 0x01;
+    for (i, &b) in frame.iter().enumerate() {
+        core.bus
+            .write_u8(0x0000_3000 + i as u32, b, CacheAttr::Uncached)
+            .unwrap();
+    }
+
+    // SI WR64B (RDRAM -> PIF RAM)
+    core.bus
+        .write_u32(0x0480_0000, 0x0000_3000, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0480_0010, 0x1FC0_07C0, CacheAttr::Uncached)
+        .unwrap();
+    assert_ne!(
+        core.bus.read_u32(0x0480_0018, CacheAttr::Uncached).unwrap() & Si::DMA_BUSY,
+        0
+    );
+    assert!(matches!(
+        core.run_cycles(5000),
+        RunOutcome::Completed { .. }
+    ));
+    assert_ne!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_SI,
+        0
+    );
+
+    // Clear SI IRQ, then SI RD64B (PIF RAM -> RDRAM 0x0000_3100)
+    core.bus
+        .write_u32(0x0480_0018, 0, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0480_0000, 0x0000_3100, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0480_0004, 0x1FC0_07C0, CacheAttr::Uncached)
+        .unwrap();
+    assert!(matches!(
+        core.run_cycles(5000),
+        RunOutcome::Completed { .. }
+    ));
+
+    // Port 0 Info response: standard controller ID 0x05, 0x00, status 0x02 (no pak) at bytes 3..6.
+    assert_eq!(core.bus.read_u8(0x0000_3103, CacheAttr::Uncached), Ok(0x05));
+    assert_eq!(core.bus.read_u8(0x0000_3104, CacheAttr::Uncached), Ok(0x00));
+    assert_eq!(core.bus.read_u8(0x0000_3105, CacheAttr::Uncached), Ok(0x02));
+}
+
+#[test]
+fn m2_ri_select_nonzero_and_vi_v_intr_fires_mi_interrupt() {
+    use crate::mi::MI_INTR_VI;
+
+    let mut cfg = N64Config::accurate();
+    cfg.soft_boot = true;
+    let mut core = N64Core::with_cart(make_idle_cart(), cfg);
+
+    // RI_SELECT must default non-zero (IPL3 / n64-systemtest boot trap contract).
+    assert_ne!(
+        core.bus.read_u32(0x0470_000C, CacheAttr::Uncached).unwrap(),
+        0
+    );
+
+    // Program NTSC VI_V_SYNC = 525 half-lines (~5963 cycles/line) and VI_V_INTR = 4 (line 2).
+    core.bus
+        .write_u32(0x0440_0018, 525, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0440_000C, 4, CacheAttr::Uncached)
+        .unwrap();
+
+    // Run enough cycles for > 2 scanlines (~12,000 cycles).
+    assert!(matches!(
+        core.run_cycles(25_000),
+        RunOutcome::Completed { .. }
+    ));
+    assert_ne!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_VI,
+        0
+    );
+
+    // Writing VI_V_CURRENT clears MI_INTR_VI.
+    core.bus
+        .write_u32(0x0440_0010, 0, CacheAttr::Uncached)
+        .unwrap();
+    assert_eq!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_VI,
+        0
+    );
+}

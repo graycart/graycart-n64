@@ -44,13 +44,28 @@ fn test_srl_edge_cases() {
 }
 
 #[test]
-fn test_sra_sign_extension() {
+fn test_sra_sign_extension_and_vr4300_64bit_quirk() {
     let mut cpu = InterpCpu::new();
-    cpu.set_gpr(2, 0x0000_0000_8000_0000);
+    // Properly sign-extended 32-bit negative value: 0xFFFF_FFFF_8000_0000 >> 31 == -1.
+    cpu.set_gpr(2, 0xFFFF_FFFF_8000_0000);
     // SRA r1, r2, 31 -> funct=0x03, sa=31
     let word = (0 << 26) | (0 << 21) | (2 << 16) | (1 << 11) | (31 << 6) | 0x03;
     helper_exec(&mut cpu, word).unwrap();
     assert_eq!(cpu.gpr(1), u64::MAX);
+
+    // VR4300 hardware quirk (N64brew): non-sign-extended 64-bit rt shifts upper bits
+    // down into bits 31..0 before sign-extending bit 31.
+    cpu.set_gpr(2, 0x0123_4567_89AB_CDEF);
+    // SRA r1, r2, 16 -> 0x0000_0000_4567_89AB
+    let word16 = (0 << 26) | (0 << 21) | (2 << 16) | (1 << 11) | (16 << 6) | 0x03;
+    helper_exec(&mut cpu, word16).unwrap();
+    assert_eq!(cpu.gpr(1), 0x0000_0000_4567_89AB);
+
+    // SRAV r3, r2, r4 (r4 = 16) -> identical VR4300 behavior
+    cpu.set_gpr(4, 16);
+    let word_srav = (0 << 26) | (4 << 21) | (2 << 16) | (3 << 11) | (0 << 6) | 0x07;
+    helper_exec(&mut cpu, word_srav).unwrap();
+    assert_eq!(cpu.gpr(3), 0x0000_0000_4567_89AB);
 }
 
 #[test]

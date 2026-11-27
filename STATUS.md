@@ -5,7 +5,7 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 ## Active Milestone
 
-- **Current:** `M1 — CPU functional` (ready to begin locally on Windows using [`docs/ORCHESTRATOR-HANDOFF.md`](./docs/ORCHESTRATOR-HANDOFF.md))
+- **Current:** `M2 — Bus + boot` receipts complete on `feat/m1-cpu` (ready for Dave's review & M3 RSP scalar + DMA kickoff)
 - **Bespoke Vulkan Compute LLE RDP Name:** **`EdgeWalker`** (zero third-party RDP forks/FFI)
 - **Debugger & UI Standard:** [`docs/13-debugger-and-ui-architecture.md`](./docs/13-debugger-and-ui-architecture.md) (Departure Mono + `btop`-inspired Machine Monitor with live CPU/Memory/GPU/Audio graphs matching `graycart-gb` & `graycart-gba`)
 - **Pre-code gate:** Accepted by Dave on 2026-11-27
@@ -15,9 +15,9 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | Milestone | Status | Gate Receipt Summary |
 |---|---|---|
 | **M0 — Scaffold** | **Done** (PR #2 merged, CI green 3/3 OS) | 21 passed (15 unit, 3 CLI smoke, 3 ROM harness), 0 failed, 3 ignored matrix stubs compiled; fmt/clippy `-D warnings` clean; macOS/Ubuntu/Windows CI green; zero forbidden binaries tracked |
-| **M1 — CPU functional** | **Wave A + Wave B Complete (`feat/m1-cpu`, awaiting M2 PI/VI/SI for full Dillonb/systemtest ROM exit gate)** | 100 passed (93 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; zero CPU opcode traps across all 26 Dillonb ROMs & 8 local commercial carts (GoldenEye booted into TLB-mapped `0x70000584`, SM64/DK64/MM reached `SI_STATUS 0x0018`) |
-| **M2 — Bus + boot** | Not started | — |
-| **M3 — RSP scalar + DMA** | Not started | — |
+| **M1 — CPU functional** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | Full VR4300 ISA + COP0/Exceptions + 32-entry TLB + COP1 IEEE-754 FPU + L1 I/D Caches + VR4300 `SRA`/`SRAV` 64-bit hardware quirk; **26/26 Dillonb `n64-tests` PASS** (0 FAIL, 0 TRAP, 0 TIMEOUT) |
+| **M2 — Bus + boot** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | 125 passed (118 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; MI/RI/PI/SI/PIF-HLE/VI/AI registers & scheduled DMA/IRQ wired; **26/26 Dillonb PASS**; **8/8 local commercial carts running 200k cycles with 0 traps** |
+| **M3 — RSP scalar + DMA** | Next | — |
 | **M4 — RSP vector unit** | Not started | — |
 | **M5 — Bespoke Software LLE RDP (`CpuRdpLle`) + VI** | Not started | — |
 | **M6 — Bespoke Vulkan Compute LLE RDP (`EdgeWalker`)** | Not started | — |
@@ -29,6 +29,25 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | **M12 — Optional dynarec + Family API extract** | Not started | — |
 
 ## Receipts
+
+### M2 — Bus, Peripherals (MI/RI/PI/SI/PIF/VI/AI) & 26/26 Dillonb CPU Conformance (`feat/m1-cpu`, 2026-11-27)
+
+- 4 parallel `flash_lite` workers (`mi`+`ri`, `pi`, `si`+`pif`, `vi`+`ai`) + Orchestrator wiring in `src/bus/mod.rs` and `src/lib.rs` (immediate-data / delayed-MI-interrupt PI DMA, SI 64B PIF<->RDRAM DMA + Joybus HLE port 0, CIC boot seeds `6101/6102/6103/6105/6106`, `RI_SELECT != 0` IPL3 boot contract, register-driven `VI` scanlines + `VI_V_INTR`, `AI` 2-slot FIFO skeleton, continuous `MI` -> `COP0.Cause.IP2` propagation).
+- Orchestrator review & hardware conformance catches fixed before commit:
+  - `src/pif/mod.rs`: Joybus RX response offset fixed from `i + 3` to `i + 2 + tx`.
+  - `src/cpu/shift.rs`: Dillonb `sra_simpleboot.z64` (test 1501) and `srav_simpleboot.z64` (test 201) caught the NEC VR4300 32-bit `SRA`/`SRAV` 64-bit right-shift hardware quirk (N64brew: shifts full 64-bit `rt` before sign-extending bit 31, so dirty upper 32 bits shift down into bits `31..0`). Fixed in `src/cpu/shift.rs` and locked with unit tests in `src/cpu/shift_tests.rs`.
+- Local validation (Windows PowerShell, `RUST_MIN_STACK=16777216`):
+  - `cargo fmt --check` → exit `0`
+  - `cargo clippy --all-targets --all-features -- -D warnings` → exit `0` (0 lint warnings)
+  - `cargo test` → exit `0`:
+    - `src/lib.rs` unit tests: **118 passed; 0 failed; 0 ignored** (+25 new unit & end-to-end M2 bus/DMA/IRQ integration tests)
+    - `tests/cli_smoke.rs`: **3 passed; 0 failed; 0 ignored**
+    - `tests/roms/main.rs`: **4 passed; 0 failed; 5 ignored**
+  - `cargo test --release --test roms matrix_dillonb_all_26 -- --ignored --nocapture` → exit `0` (**4.45s**):
+    - **`26/26 PASS | 0 FAIL | 0 TRAP | 0 TIMEOUT`** across all 26 `Dillonb/n64-tests` simpleboot ROMs (`addiu`, `addu`, `and`, `andi`, `basic`, `daddiu`, `dsll`, `dsll32`, `dsllv`, `dsra32`, `nor`, `or`, `ori`, `sll`, `sllv`, `slt`, `slti`, `sltiu`, `sltu`, `sra`, `srav`, `srl`, `srlv`, `subu`, `xor`, `xori`).
+  - `cargo test --release --test roms probe_local_carts -- --ignored --nocapture` (local-only `..\carts\n64`, **0.14s**):
+    - **8/8 commercial carts ran 200,000 cycles cleanly with ZERO traps** across `Cic6102` (SM64, MK64, GoldenEye 007 in TLB KUSEG `0x70000584`, Star Wars Ep. I Racer), `Cic6103` (Super Smash Bros.), and `Cic6105` (Ocarina of Time, Majora's Mask, Donkey Kong 64).
+  - Forbidden-binary git check → `Clean: no forbidden binaries tracked`.
 
 ### M1 Wave B — COP0/Exceptions, 32-Entry TLB, COP1 FPU & L1 Caches (`feat/m1-cpu`, 2026-11-27)
 

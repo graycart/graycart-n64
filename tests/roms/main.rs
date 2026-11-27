@@ -131,7 +131,7 @@ fn matrix_dillonb_all_26() {
         soft_boot: true,
         entry: Some(0x8000_1000),
         expansion_pak: true,
-        max_cycles: 5_000_000,
+        max_cycles: 40_000_000,
     };
 
     let mut passed = 0usize;

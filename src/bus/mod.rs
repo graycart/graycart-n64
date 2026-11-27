@@ -12,17 +12,18 @@ mod tests;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ai::Ai;
+use crate::ai::{Ai, AiAction};
 use crate::cart::Cart;
-use crate::mi::Mi;
-use crate::pi::Pi;
+use crate::mi::{Mi, MI_INTR_AI, MI_INTR_PI, MI_INTR_SI, MI_INTR_VI};
+use crate::pi::{Pi, PiAction};
 use crate::pif::Pif;
 use crate::rdp::CpuRdpLle;
 use crate::ri::Ri;
 use crate::rsp::{DMEM_SIZE, IMEM_SIZE};
-use crate::si::Si;
+use crate::schedule::EventKind;
+use crate::si::{Si, SiAction};
 use crate::trap::Trap;
-use crate::vi::Vi;
+use crate::vi::{Vi, ViAction};
 
 pub use isviewer::{IsViewer, ISVIEWER_BASE, ISVIEWER_END, ISVIEWER_MAGIC};
 pub use rdram::Rdram;
@@ -146,6 +147,11 @@ pub struct Bus {
     pub isviewer: IsViewer,
     pub cart: Option<Cart>,
     pub isviewer_enabled: bool,
+    /// Pending PI DMA byte count for `complete_pi_dma`.
+    pub pending_pi_len: u32,
+    /// Out-of-band scheduler events queued by MMIO DMA triggers (drained by `N64Core`).
+    #[serde(skip)]
+    pub pending_events: Vec<(u64, EventKind)>,
 }
 
 impl Bus {
@@ -165,7 +171,59 @@ impl Bus {
             isviewer: IsViewer::new(),
             cart: None,
             isviewer_enabled,
+            pending_pi_len: 0,
+            pending_events: Vec::new(),
         }
+    }
+
+    /// Drain queued peripheral scheduler requests into the master scheduler.
+    pub fn drain_pending_events(&mut self) -> Vec<(u64, EventKind)> {
+        std::mem::take(&mut self.pending_events)
+    }
+
+    /// Complete an in-flight PI DMA (clears `PI_STATUS.DMA_BUSY`, asserts `MI_INTR_PI`).
+    pub fn complete_pi_dma(&mut self) {
+        let len = self.pending_pi_len;
+        self.pending_pi_len = 0;
+        self.pi.complete_dma(len);
+        self.mi.set_intr(MI_INTR_PI);
+    }
+
+    /// Complete an in-flight SI DMA (clears `SI_STATUS.DMA_BUSY`, asserts `MI_INTR_SI`).
+    pub fn complete_si_dma(&mut self) {
+        self.si.complete_dma();
+        self.mi.set_intr(MI_INTR_SI);
+    }
+
+    /// Execute immediate-data Cart → RDRAM PI DMA copy (interrupt delayed per §3.3).
+    fn copy_cart_to_rdram(&mut self, dram_addr: u32, cart_addr: u32, len: u32) {
+        let rom = self.cart.as_ref().map(Cart::rom).unwrap_or(&[]);
+        for i in 0..len {
+            let ca = cart_addr.wrapping_add(i);
+            let byte = if ca >= 0x1000_0000 {
+                let off = (ca - 0x1000_0000) as usize;
+                rom.get(off).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            self.rdram.write_u8(dram_addr.wrapping_add(i), byte);
+        }
+    }
+
+    /// Copy 64 bytes from PIF RAM into RDRAM at `dram_addr` (running Joybus HLE first).
+    fn copy_pif_to_rdram(&mut self, dram_addr: u32) {
+        self.pif.execute_joybus();
+        for (i, &b) in self.pif.ram.iter().enumerate() {
+            self.rdram.write_u8(dram_addr.wrapping_add(i as u32), b);
+        }
+    }
+
+    /// Copy 64 bytes from RDRAM at `dram_addr` into PIF RAM and run PIF write commands.
+    fn copy_rdram_to_pif(&mut self, dram_addr: u32) {
+        for i in 0..self.pif.ram.len() {
+            self.pif.ram[i] = self.rdram.read_u8(dram_addr.wrapping_add(i as u32));
+        }
+        self.pif.process_write_command();
     }
 
     pub fn attach_cart(&mut self, cart: Cart) {
@@ -431,11 +489,76 @@ impl Bus {
                 Ok(())
             }
             PhysRegion::MiRegs => self.mi.write_reg(pa & 0xFFFF, val),
-            PhysRegion::ViRegs => self.vi.write_reg(pa & 0xFFFF, val),
-            PhysRegion::AiRegs => self.ai.write_reg(pa & 0xFFFF, val),
-            PhysRegion::PiRegs => self.pi.write_reg(pa & 0xFFFF, val),
+            PhysRegion::ViRegs => {
+                if let ViAction::ClearIntr = self.vi.write_reg_action(pa & 0xFFFF, val)? {
+                    self.mi.clear_intr(MI_INTR_VI);
+                }
+                Ok(())
+            }
+            PhysRegion::AiRegs => {
+                match self.ai.write_reg_action(pa & 0xFFFF, val)? {
+                    AiAction::StartDma { delay_cycles } => {
+                        self.pending_events
+                            .push((delay_cycles, EventKind::AiDmaStep));
+                    }
+                    AiAction::ClearIntr => self.mi.clear_intr(MI_INTR_AI),
+                    AiAction::None => {}
+                }
+                Ok(())
+            }
+            PhysRegion::PiRegs => {
+                match self.pi.write_reg_action(pa & 0xFFFF, val)? {
+                    PiAction::StartCartToRdram {
+                        dram_addr,
+                        cart_addr,
+                        len,
+                        delay_cycles,
+                    } => {
+                        // Immediate-data / delayed-MI-interrupt PI DMA (§3.3).
+                        self.copy_cart_to_rdram(dram_addr, cart_addr, len);
+                        self.pending_pi_len = len;
+                        self.pending_events
+                            .push((delay_cycles, EventKind::PiDmaComplete));
+                    }
+                    PiAction::StartRdramToCart {
+                        len, delay_cycles, ..
+                    } => {
+                        self.pending_pi_len = len;
+                        self.pending_events
+                            .push((delay_cycles, EventKind::PiDmaComplete));
+                    }
+                    PiAction::ClearIntr => self.mi.clear_intr(MI_INTR_PI),
+                    PiAction::Reset => {
+                        self.pending_pi_len = 0;
+                    }
+                    PiAction::None => {}
+                }
+                Ok(())
+            }
             PhysRegion::RiRegs => self.ri.write_reg(pa & 0xFFFF, val),
-            PhysRegion::SiRegs => self.si.write_reg(pa & 0xFFFF, val),
+            PhysRegion::SiRegs => {
+                match self.si.write_reg_action(pa & 0xFFFF, val)? {
+                    SiAction::DmaPifToRdram {
+                        dram_addr,
+                        delay_cycles,
+                    } => {
+                        self.copy_pif_to_rdram(dram_addr);
+                        self.pending_events
+                            .push((delay_cycles, EventKind::SiDmaComplete));
+                    }
+                    SiAction::DmaRdramToPif {
+                        dram_addr,
+                        delay_cycles,
+                    } => {
+                        self.copy_rdram_to_pif(dram_addr);
+                        self.pending_events
+                            .push((delay_cycles, EventKind::SiDmaComplete));
+                    }
+                    SiAction::ClearIntr => self.mi.clear_intr(MI_INTR_SI),
+                    SiAction::None => {}
+                }
+                Ok(())
+            }
             PhysRegion::RdpCmdRegs => CpuRdpLle::new().write_cmd_reg(pa & 0xFFFF, val),
             PhysRegion::RdpSpanRegs => CpuRdpLle::new().write_span_reg(pa & 0xFFFF, val),
             PhysRegion::IsViewer => {
@@ -445,6 +568,9 @@ impl Bus {
             PhysRegion::PifRam => {
                 let idx = (pa - 0x1FC0_07C0) as usize;
                 self.pif.ram[idx..idx + 4].copy_from_slice(&val.to_be_bytes());
+                if idx == 60 {
+                    self.pif.process_write_command();
+                }
                 Ok(())
             }
             other => Err(self.unimplemented_region_trap(other, pa, true)),

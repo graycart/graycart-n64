@@ -1,7 +1,8 @@
 //! NEC VR4300 shift instructions (SLL, SRL, SRA, SLLV, SRLV, SRAV, DSLL, DSRL, DSRA, DSLLV, DSRLV, DSRAV, DSLL32, DSRL32, DSRA32).
 //!
 //! Cited: NEC VR4300, VR4305, VR4310 User's Manual (U10504EJ7V0UMJ1), Chapter 16
-//!   via docs/01-cpu-r4300i.md
+//!   via docs/01-cpu-r4300i.md; N64brew — VR4300 32-bit Shift Right Arithmetic Bug
+//!   https://n64brew.dev/wiki/VR4300
 
 use crate::trap::Trap;
 
@@ -31,9 +32,10 @@ pub fn exec_special(cpu: &mut InterpCpu, pc: u64, inst: Inst) -> Result<u64, Tra
             (((val >> sa) as i32) as i64) as u64
         }
         0x03 => {
-            // SRA
-            let val = cpu.gpr(rt) as i32;
-            ((val >> sa) as i64) as u64
+            // SRA — VR4300 hardware shifts the full 64-bit rt before sign-extending bit 31
+            // (matches standard 32-bit SRA for sign-extended inputs, and leaks bits 63..32
+            // on non-sign-extended 64-bit inputs per N64brew VR4300 hardware errata).
+            ((((cpu.gpr(rt) as i64) >> sa) as i32) as i64) as u64
         }
         0x04 => {
             // SLLV
@@ -48,10 +50,9 @@ pub fn exec_special(cpu: &mut InterpCpu, pc: u64, inst: Inst) -> Result<u64, Tra
             (((val >> sh) as i32) as i64) as u64
         }
         0x07 => {
-            // SRAV
+            // SRAV — same VR4300 64-bit right-shift datapath as SRA.
             let sh = (cpu.gpr(rs) as u32) & 0x1F;
-            let val = cpu.gpr(rt) as i32;
-            ((val >> sh) as i64) as u64
+            ((((cpu.gpr(rt) as i64) >> sh) as i32) as i64) as u64
         }
         0x14 => {
             // DSLLV
