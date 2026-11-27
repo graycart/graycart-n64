@@ -13,7 +13,7 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 | Milestone | Status | Gate Receipt Summary |
 |---|---|---|
-| **M0 — Scaffold** | In progress | Crate bootstrap, license boundary, bus/9th-bit RDRAM, scheduler + Count wrap test, ROM loader, headless ISViewer runner, CI suite plumbing |
+| **M0 — Scaffold** | Awaiting Dave receipt review | 21 passed (15 unit, 3 CLI smoke, 3 ROM harness), 0 failed, 3 ignored matrix stubs compiled; fmt/clippy `-D warnings` clean; zero forbidden binaries tracked |
 | **M1 — CPU functional** | Not started | — |
 | **M2 — Bus + boot** | Not started | — |
 | **M3 — RSP scalar + DMA** | Not started | — |
@@ -29,7 +29,18 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 ## Receipts
 
-*(Populated at the end of each task with exact command outputs.)*
+### M0 — Scaffold (`feat/m0-scaffold`, 2026-11-27)
+
+- `cargo fmt --check` → exit `0`
+- `cargo clippy --all-targets --all-features -- -D warnings` → exit `0` (0 warnings)
+- `RUST_MIN_STACK=16777216 cargo test` → exit `0`:
+  - `src/lib.rs` unit tests: **15 passed; 0 failed; 0 ignored** (core serde round-trip, anti-stub traps, full physical decode map, cached-MMIO freeze, unmapped & 64-bit RCP freezes, RDRAM 4/8 MiB + bit-packed 9th-bit array, ISViewer ring buffer + wrap, 2/3 RCP rational accumulator, deterministic event queue + single-step mode, Count/Compare mid-slice & 32-bit wrap-safe scheduling, `.z64`/`.v64`/`.n64` normalization, header parse, CIC CRC32 table)
+  - `tests/cli_smoke.rs`: **3 passed; 0 failed; 0 ignored** (`--version`/`--help`, synthetic ROM run + `--hash-out` + explicit M0 CPU trap at soft-boot entry PC, ISViewer public API stream capture)
+  - `tests/roms/main.rs`: **3 passed; 0 failed; 3 ignored** (`tests/fixtures/README.md` + `peterlemon-manifest.json` validation, `n64-systemtest` / `nemu64-test` ISViewer log parser, missing-fixture `BootFail`; ignored matrix stubs `matrix_dillonb_basic`, `matrix_n64_systemtest_base`, `matrix_nemu64_test_base`)
+- `cargo test --tests --no-run` → exit `0` (all ignored ROM harness targets compile cleanly)
+- `cargo run -- --version` → `graycart-n64 0.0.1`
+- `bash -n scripts/fetch-suites.sh && bash scripts/fetch-suites.sh --dry-run` → exit `0`
+- Forbidden-binary git check → `Clean: no forbidden binaries tracked`
 
 ## Ruled Out
 
