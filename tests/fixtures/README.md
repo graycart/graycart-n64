@@ -15,20 +15,27 @@ Default CI (`cargo test` without `-- --ignored`) MUST remain **100% ROM-free and
 | **lemmy-64/n64-systemtest** | https://github.com/lemmy-64/n64-systemtest | MIT | Vendoring built ROM + `LICENSE` allowed (frozen regression gate) | `tests/fixtures/fetched/systemtest/` |
 | **thelemmy/nemu64-test** | https://github.com/thelemmy/nemu64-test | MIT | Vendoring built ROM + `LICENSE` allowed (pinned dual-gate successor) | `tests/fixtures/fetched/nemu64/` |
 | **PeterLemon/N64 (krom)** | https://github.com/PeterLemon/N64 | Unlicense | Curated manifest only (`peterlemon-manifest.json`); **exclude bundled bootcode** | `tests/fixtures/fetched/peterlemon/` |
-| **Dillonb/n64-tests** | https://github.com/Dillonb/n64-tests | **None (no LICENSE)** | **NEVER commit, mirror, or redistribute.** Fetch-and-run only. | `tests/fixtures/fetched/dillonb/` |
+| **rasky/n64memtest** | https://github.com/rasky/n64memtest | MIT / libdragon | Fetch-and-run (`v0.9/n64memtest.z64`) | `tests/fixtures/fetched/n64memtest/` |
+| **rasky/n64-systemcrash** | https://github.com/rasky/n64-systemcrash | **None declared** | **NEVER commit.** Fetch-and-run only (hardware freeze oracle). | `tests/fixtures/fetched/systemcrash/` |
+| **Dillonb/n64-tests** | https://github.com/Dillonb/n64-tests | **None (no LICENSE)** | **NEVER commit, mirror, or redistribute.** Fetch-and-run only (`dillon-n64-tests.zip` + `dillon-n64-tests-simpleboot.zip`, 26 ROMs each). | `tests/fixtures/fetched/dillonb/` & `dillonb-simpleboot/` |
 | **240p Test Suite (N64)** | https://github.com/ArtemioUrbina/240pTestSuite | GPL-2.0+ | **NEVER commit into MIT crate.** Fetch-and-run only (VI gate). | `tests/fixtures/fetched/240p/` |
-| **Commercial ROMs / PIF / CIC / IPL** | — | Proprietary | **FORBIDDEN in git.** Local smoke only under `carts/`. | `carts/` (gitignored) |
+| **Commercial ROMs / PIF / CIC / IPL** | — | Proprietary | **FORBIDDEN in git.** Local smoke only under `carts/` or `../carts/n64/`. | `carts/` (gitignored) |
 
 ## Fetching Suites Locally or in Opt-In Conformance Jobs
 
+```powershell
+# Windows (PowerShell):
+.\scripts\fetch-suites.ps1 -Suite dillonb
+.\scripts\fetch-suites.ps1 -Suite n64memtest
+.\scripts\fetch-suites.ps1 -Suite all -DryRun
+$env:RUST_MIN_STACK = "16777216"; cargo test --test roms -- --ignored --nocapture
+```
+
 ```bash
-# Preview target paths and URLs without downloading
+# macOS / Linux (Bash):
 bash scripts/fetch-suites.sh --dry-run
-
-# Fetch a specific suite into gitignored tests/fixtures/fetched/
 bash scripts/fetch-suites.sh --suite dillonb
-
-# Run ignored ROM matrix explicitly (never in default CI)
+bash scripts/fetch-suites.sh --suite n64memtest
 RUST_MIN_STACK=16777216 cargo test --test roms -- --ignored --nocapture
 ```
 

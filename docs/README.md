@@ -59,8 +59,9 @@ Provenance archives (excerpts, licenses, retrieved dates): **[provenance/](./pro
 | [PHASES.md](./PHASES.md) | Phase checklist / milestones | Written |
 | [09-graphics-plugin-accuracy.md](./09-graphics-plugin-accuracy.md) | LLE RDP vs HLE microcode tradeoffs | Written |
 | [10-family-api-and-reuse.md](./10-family-api-and-reuse.md) | Graycart family API + reuse notes | Written |
-| [11-test-apparatus.md](./11-test-apparatus.md) | Suite inventory, vendoring, harness API | Written |
+| [11-test-apparatus.md](./11-test-apparatus.md) | Suite inventory (Blargg/Mooneye equivalents), vendoring, harness API | Written |
 | [12-test-gates.md](./12-test-gates.md) | Phase freeze + CI gate map | Written |
+| [13-debugger-and-ui-architecture.md](./13-debugger-and-ui-architecture.md) | Machine Monitor, live CPU/Memory/GPU/Audio graphs & UI aligned with `graycart-gb`/`graycart-gba` | Active |
 
 Broken links here mean a sibling page has not landed yet — keep the href stable.
 

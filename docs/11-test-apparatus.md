@@ -24,52 +24,69 @@ Note: suite inventory + harness plan; no implementation this research turn. Retr
 
 ---
 
-## 1. Canonical suites
+## 1. Canonical Suites (N64 Equivalents of Game Boy Blargg & Mooneye)
 
-### 1.1 Dillonb/n64-tests — young CPU gate
+For Game Boy (`graycart-gb`), **Blargg** tests individual CPU instruction/subsystem correctness and **Mooneye** tests strict hardware quirks and cycle-exact edge cases. The N64 ecosystem has direct equivalents across every subsystem:
+
+| Suite | GB Analogy | Upstream | License | Acquisition (Windows & POSIX) | Oracle Mechanism | Primary Milestones |
+|---|---|---|---|---|---|---|
+| **Dillonb/n64-tests** (26 CPU ROMs + `simpleboot` set) | **Blargg `cpu_instrs`** (per-instruction early CPU suite) | https://github.com/Dillonb/n64-tests | **None** (fetch-only; NEVER commit) | Prebuilt release zips (`dillon-n64-tests.zip`, `dillon-n64-tests-simpleboot.zip`) via `fetch-suites.ps1` / `.sh` | `r30 == -1` (`0xFFFF_FFFF_FFFF_FFFF`) pass; `r30 > 0` fail ID; `simpleboot` jumps straight to `0x8000_1000` | **M1** |
+| **lemmy-64/n64-systemtest** | **Mooneye** (frozen comprehensive hardware-quirk suite) | https://github.com/lemmy-64/n64-systemtest | **MIT** | Source build via Rust + `nust64` (no GitHub Release binary); open IPL3 | Self-judging ISViewer log (`Done! Tests: N. Failed: M`) per category: CPU, COP0, TLB, COP1, Bus/Mem, RSP | **M1–M4, M10** |
+| **thelemmy/nemu64-test** | **Mooneye (active successor, Jul 2026+)** | https://github.com/thelemmy/nemu64-test | **MIT** | Source build via Rust + `nust64 0.4.1` (includes Windows `run-base.bat`, `run-timing.bat`) | Self-judging ISViewer log + opt-in feature ROMs (`timing`, `cop0hazard`, `cycle`, `vmulf`/`vmulu` RSP stress) | **M1–M4, M10** |
+| **PeterLemon/N64 (krom)** | **Blargg micro-tests + visual demos** | https://github.com/PeterLemon/N64 | **Unlicense** (exclude bundled bootcode) | Curated manifest (`tests/fixtures/peterlemon-manifest.json`); builds with `bass` | Visual / framebuffer hashes across `CPUTest`, `FPU`, `RSPTest`, `RDP` primitives | **M1, M3–M5** |
+| **rasky/n64memtest** (`v0.9`) | **Memory/bus stress fixture** | https://github.com/rasky/n64memtest | MIT / libdragon | Prebuilt release `n64memtest.z64` via `fetch-suites.ps1` / `.sh` | 18 RDRAM March/walking-bit/checkerboard diagnostics + headless burn-in mode | **M2, M5** |
+| **rasky/n64-systemcrash** | **Hardware freeze/crash oracle** | https://github.com/rasky/n64-systemcrash | None declared (fetch-only) | Source clone (`libdragon`); triggers real retail N64 hard freezes | Verifies Graycart's "Trap, don't stub" hardware-freeze semantics (cached MMIO, unmapped windows, RDP lockups) | **M2, M5, M10** |
+| **rsp-ruination** & RSP vector stress | **RSP torture tests** | Community / `nemu64-test` `vmulf`/`vmulu` features | Check upstream | `nemu64-test` stress features + community RSP torture ROMs | Exact 48-bit VU accumulator carry & clamping verification | **M4** |
+| **DragonMinded/libdragon** examples & open IPL3 | **Homebrew SDK integration & audio/RDP smoke** | https://github.com/DragonMinded/libdragon | **Unlicense** | Built examples / open IPL3 | Real open-IPL3 boot path, `rdpq` 2D/3D frames, RSP audio mixer PCM hash | **M2, M4–M7** |
+| **240p Test Suite (N64)** | **Display/VI calibration oracle** | https://github.com/ArtemioUrbina/240pTestSuite | **GPL-2.0+** (fetch-only; NEVER commit) | Official release download into `tests/fixtures/fetched/240p/` | VI resolution, de-interlace, overscan, color/gamma, and scanline checks | **M5, M10** |
+| **RDP Golden Corpus (offline)** | **PPU golden frame hashes** | Hand-built DLs cross-checked offline vs `angrylion-rdp-plus` / `paraLLEl-RDP` | Goldens/scripts only (NEVER port MAME/GPL code) | Offline reference renders | Pre-VI-filter and post-VI-filter FNV-1a/SHA-256 frame hashes (`CpuRdpLle` == `EdgeWalker`) | **M5–M6** |
+| **Local Commercial Corpus** (`..\carts\n64\`) | **Real-world smoke & regression probe** | User's local `carts/n64/` (gitignored, outside repo) | Proprietary (**NEVER** commit or require in CI) | Local disk only (covers CIC-6102 & CIC-6105, 4/8 MiB, EEPROM/SRAM/FlashRAM) | Step-by-step boot progress probe (boot stage, cycles, trap PC, framebuffer hash); M9 title-screen hashes | **M1–M9 (progress probe)** |
+
+### 1.1 Dillonb/n64-tests — young CPU gate (verified 26-ROM inventory)
 
 | | |
 |--|--|
 | **URL** | https://github.com/Dillonb/n64-tests |
-| **License** | Check upstream README/LICENSE before vendor |
-| **Covers** | Early CPU; soft-boot friendly |
-| **Oracle** | `r30 == -1` pass; `r30 > 0` fail id |
-| **Soft-boot** | PC `0x80001000`; copy `0x100000` bytes from cart `0x10001000` → RDRAM `0x00001000` if skipping IPL |
+| **License** | **None declared** — strictly fetch-and-run only (`THIRD_PARTY.md`) |
+| **Prebuilt Release Assets** | `dillon-n64-tests.zip` and `dillon-n64-tests-simpleboot.zip` under release tag `latest` (26 `.z64` ROMs each: `basic`, `addiu`, `addu`, `and`, `andi`, `daddiu`, `dsll`, `dsll32`, `dsllv`, `dsra32`, `nor`, `or`, `ori`, `sll`, `sllv`, `slt`, `slti`, `sltiu`, `sltu`, `sra`, `srav`, `srl`, `srlv`, `subu`, `xor`, `xori`) |
+| **Oracle** | `r30 == -1` (`u64::MAX`) pass; `r30 > 0` fail test ID; `r30 == 0` still running |
+| **Soft-boot** | PC `0x8000_1000`; copy up to `0x10_0000` bytes from cart `0x1000` → RDRAM `0x0000_1000` |
 | **Provenance** | [tests/dillonb-n64-tests.md](./provenance/tests/dillonb-n64-tests.md) |
 
-### 1.2 lemmy-64/n64-systemtest — broad board
+### 1.2 lemmy-64/n64-systemtest & thelemmy/nemu64-test — broad Mooneye-class boards
 
 | | |
 |--|--|
-| **URL** | https://github.com/lemmy-64/n64-systemtest |
-| **License** | Check upstream |
-| **Covers** | COP0 wide regs, LL/SC, exceptions, TLB, mem sizes, RSP, quirks; optional timing/cycle/cop0hazard |
-| **Boot** | libdragon open IPL3 |
+| **URLs** | https://github.com/lemmy-64/n64-systemtest (frozen) · https://github.com/thelemmy/nemu64-test (active successor) |
+| **License** | **MIT** |
+| **Covers** | VR4300 64-bit/32-bit ISA, COP0 wide regs, LL/SC, exceptions, TLB, COP1 FPU, mem sizes/bus quirks, RSP SU+VU, RDP; optional `timing`/`cycle`/`cop0hazard`/`vmulf`/`vmulu` feature ROMs |
+| **Build & Boot** | Built locally with Rust + `nust64`; boots via real libdragon open IPL3 and self-reports over ISViewer 64 |
 | **Provenance** | [tests/n64-systemtest.md](./provenance/tests/n64-systemtest.md) |
 
-### 1.3 PeterLemon/N64 — demos / CPUTest
+### 1.3 PeterLemon/N64 — bare-metal micro-tests & visuals
 
 | | |
 |--|--|
 | **URL** | https://github.com/PeterLemon/N64 |
-| **Covers** | Bare-metal CPU/RDP visuals |
+| **License** | **Unlicense** (curated manifest only; exclude bundled bootcode) |
+| **Covers** | Bare-metal CPU/FPU/RSP/RDP micro-tests and demos |
 | **Oracle** | Frame hashes / visual smoke |
 | **Provenance** | [tests/peterlemon-n64.md](./provenance/tests/peterlemon-n64.md) |
 
-### 1.4 RDP golden corpus (internal)
+### 1.4 rasky/n64memtest & rasky/n64-systemcrash — RDRAM & hardware-freeze oracles
 
 | | |
 |--|--|
-| **Source** | Hand-built DLs; compare to angrylion-plus / paraLLEl outputs generated **offline** |
-| **Vendor** | Goldens + scripts only |
+| **URLs** | https://github.com/rasky/n64memtest (`v0.9` prebuilt `n64memtest.z64`) · https://github.com/rasky/n64-systemcrash (source, fetch-only) |
+| **Covers** | 18 RDRAM March/walking-bit tests (headless burn-in supported) and deliberate retail N64 hardware freeze/crash triggers |
+
+### 1.5 RDP golden corpus & libdragon examples
+
+| | |
+|--|--|
+| **Source** | Hand-built DLs compared offline to `angrylion-rdp-plus` / `paraLLEl-RDP`, plus [DragonMinded/libdragon](https://github.com/DragonMinded/libdragon) (Unlicense) examples & open IPL3 |
+| **Vendor** | Goldens + scripts only (zero third-party RDP code) |
 | **Provenance** | [tests/rdp-goldens.md](./provenance/tests/rdp-goldens.md) |
-
-### 1.5 libdragon examples
-
-| | |
-|--|--|
-| **URL** | https://github.com/DragonMinded/libdragon |
-| **Use** | Integration smoke; open IPL3 |
 
 ---
 

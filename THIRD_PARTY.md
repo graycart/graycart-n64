@@ -40,7 +40,9 @@ Note: Machine-readable third-party license boundary for graycart-n64 (MIT).
 | **lemmy-64/n64-systemtest** | MIT | Allowed (with LICENSE) | Frozen regression gate; build/pin from source or vendor built ROM + `LICENSE`. |
 | **thelemmy/nemu64-test** | MIT | Allowed (with LICENSE) | Active successor (Jul 2026+); pin commit for dual-gate coverage. |
 | **PeterLemon/N64 (krom)** | Unlicense | Curated manifest only | Too large (~2 GB) wholesale. Gate on curated hashed subset; **exclude bundled bootcode** (study-only). |
-| **Dillonb/n64-tests** | **No license** | **FORBIDDEN** | Absence of license != public domain. **Fetch-and-run only** into gitignored `tests/fixtures/fetched/dillonb/`; NEVER commit or mirror. |
+| **rasky/n64memtest** | MIT / libdragon | Fetch-only (`n64memtest.z64` v0.9) | Prebuilt RDRAM March/pattern diagnostic ROM fetched into gitignored `tests/fixtures/fetched/n64memtest/`. |
+| **rasky/n64-systemcrash** | **No explicit license** | **FORBIDDEN** | Fetch-and-run only into gitignored `tests/fixtures/fetched/systemcrash/`; hardware freeze/crash oracle. |
+| **Dillonb/n64-tests** | **No license** | **FORBIDDEN** | Absence of license != public domain. **Fetch-and-run only** into gitignored `tests/fixtures/fetched/dillonb/` (`dillon-n64-tests.zip` + `dillon-n64-tests-simpleboot.zip`); NEVER commit or mirror. |
 | **240p Test Suite (N64)** | GPL-2.0+ | **FORBIDDEN** | **Fetch-and-run only** into gitignored `tests/fixtures/fetched/240p/`; NEVER commit into this MIT repo. |
 | **Commercial ROMs / PIF / CIC / IPL dumps** | Proprietary | **FORBIDDEN** | Local-only under gitignored `carts/`; NEVER commit, NEVER require for CI. |
 
