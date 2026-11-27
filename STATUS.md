@@ -5,7 +5,7 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 ## Active Milestone
 
-- **Current:** `M3 — RSP scalar + DMA` receipts complete on `feat/m1-cpu` (ready for Dave's review & M4 RSP Vector Unit kickoff)
+- **Current:** `M4 — RSP vector unit` receipts complete on `feat/m1-cpu` (ready for Dave's review & M5 Bespoke Software LLE RDP `CpuRdpLle` + VI kickoff)
 - **Bespoke Vulkan Compute LLE RDP Name:** **`EdgeWalker`** (zero third-party RDP forks/FFI)
 - **Debugger & UI Standard:** [`docs/13-debugger-and-ui-architecture.md`](./docs/13-debugger-and-ui-architecture.md) (Departure Mono + `btop`-inspired Machine Monitor with live CPU/Memory/GPU/Audio graphs matching `graycart-gb` & `graycart-gba`)
 - **Pre-code gate:** Accepted by Dave on 2026-11-27
@@ -17,9 +17,9 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | **M0 — Scaffold** | **Done** (PR #2 merged, CI green 3/3 OS) | 21 passed (15 unit, 3 CLI smoke, 3 ROM harness), 0 failed, 3 ignored matrix stubs compiled; fmt/clippy `-D warnings` clean; macOS/Ubuntu/Windows CI green; zero forbidden binaries tracked |
 | **M1 — CPU functional** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | Full VR4300 ISA + COP0/Exceptions + 32-entry TLB + COP1 IEEE-754 FPU + L1 I/D Caches + VR4300 `SRA`/`SRAV` 64-bit hardware quirk; **26/26 Dillonb `n64-tests` PASS** (0 FAIL, 0 TRAP, 0 TIMEOUT) |
 | **M2 — Bus + boot** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | MI/RI/PI/SI/PIF-HLE/VI/AI registers & scheduled DMA/IRQ wired; **26/26 Dillonb PASS**; **8/8 local commercial carts running 200k cycles with 0 traps** |
-| **M3 — RSP scalar + DMA** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | 140 passed (133 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; SP MMIO + 2D skip/count DMA + full 32-bit RSP Scalar Unit + `BREAK`/`COP0` + exact 2/3 RCP scheduling; **26/26 Dillonb PASS**; **7/8 local commercial carts running 2,000,000 cycles cleanly** |
-| **M4 — RSP vector unit** | Next | — |
-| **M5 — Bespoke Software LLE RDP (`CpuRdpLle`) + VI** | Not started | — |
+| **M3 — RSP scalar + DMA** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | SP MMIO + 2D skip/count DMA + full 32-bit RSP Scalar Unit + `BREAK`/`COP0` + exact 2/3 RCP scheduling; **26/26 Dillonb PASS**; **7/8 local commercial carts running 2,000,000 cycles cleanly** |
+| **M4 — RSP vector unit** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | 160 passed (153 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; full 32×128-bit VU (`LWC2`/`SWC2` + 8×8 transpose, 22 arith/MAC ops w/ 48-bit acc, 17 compare/clip/logic ops, `MFC2`/`MTC2`/`CFC2`/`CTC2`, zero-float integer `RCP`/`RSQ` 512-entry ROMs); **26/26 Dillonb PASS** |
+| **M5 — Bespoke Software LLE RDP (`CpuRdpLle`) + VI** | Next | — |
 | **M6 — Bespoke Vulkan Compute LLE RDP (`EdgeWalker`)** | Not started | — |
 | **M7 — Audio (AI + RSP mixer)** | Not started | — |
 | **M8 — PIF/Joybus/Saves/4-port Transfer Pak** | Not started | — |
@@ -29,6 +29,29 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | **M12 — Optional dynarec + Family API extract** | Not started | — |
 
 ## Receipts
+
+### M4 — RSP Vector Unit (COP2 / LWC2 / SWC2) (`feat/m1-cpu`, 2026-11-27)
+
+- Orchestrator M4.0 seam (`src/rsp/vu.rs` 32×128-bit VPR, 8×48-bit accumulator `acc_hi`/`acc_md`/`acc_lo`, `VCO`/`VCC`/`VCE`, element swizzle engine, signed/unsigned/low accumulator clampers, COP2/LWC2/SWC2 dispatch in `src/rsp/scalar.rs`) + 4 parallel `flash_lite` workers on strictly disjoint files:
+  - **M4-W1** (`src/rsp/vu_lsu.rs` + `vu_lsu_tests.rs`): all 11 `LWC2` loads (`LBV`..`LTV`) and 12 `SWC2` stores (`SBV`..`STV` + `SWV`) with 4 KiB wrapping DMEM and 8×8 matrix transpose.
+  - **M4-W2** (`src/rsp/vu_arith.rs` + `vu_arith_tests.rs`): all 22 multiply/MAC/add/sub/abs/saw VU arithmetic ops (`VMULF`, `VMULU`, `VRNDP`, `VMULQ`, `VMUDL/M/N/H`, `VMACF`, `VMACU`, `VRNDN`, `VMACQ`, `VMACL/M/N/H`, `VADD`, `VSUB`, `VABS`, `VADDC`, `VSUBC`, `VSAW`).
+  - **M4-W3** (`src/rsp/vu_logic_cmp.rs` + `vu_logic_cmp_tests.rs`): all 17 compare/clip/merge/logic/move/nop ops (`VLT`, `VEQ`, `VNE`, `VGE`, `VCL`, `VCH`, `VCR`, `VMRG`, `VAND`/`VNAND`/`VOR`/`VNOR`/`VXOR`/`VNXOR`, `VMOV`, `VNOP`/`VNULL`).
+  - **M4-W4** (`src/rsp/vu_recip.rs` + `vu_recip_tests.rs`): `MFC2`/`MTC2`/`CFC2`/`CTC2` + 512-entry integer `RCP_ROM`/`RSQ_ROM` lookup tables (`VRCP`/`VRCPL`/`VRCPH`/`VRSQ`/`VRSQL`/`VRSQH`).
+- Orchestrator line-by-line review caught & fixed 5 bugs before commit:
+  - `src/rsp/vu_lsu.rs`: `LTV` double-rotated source offsets and `STV` echoed `LTV` instead of reading the diagonal (`vpr[vr][i]`); fixed both to exact transpose equations and locked with an asymmetric 8×8 matrix transpose test.
+  - `src/rsp/vu_logic_cmp.rs`: `VMOV` (`0x33`) was missing early `return Ok(())`, causing the trailing `rsp.vu.vpr[vd] = out` to overwrite all 8 lanes instead of only lane `vs & 7`; fixed and verified.
+  - `src/rsp/vu_recip.rs`: replaced floating-point `get_rsq` and clamped `get_rcp` shift with zero-float 128-bit integer `isqrt` `RSQ_ROM` and exact N64 `msb` shift + 1's-complement negation.
+  - Restored `#[cfg(test)] #[path = ...]` test module hooks dropped in `vu_arith.rs` & `vu_logic_cmp.rs`, fixed `MTC2` low-16-bit assertion, and added end-to-end `m4_rsp_vector_program_lqv_vadd_sqv_end_to_end` in `src/tests.rs`.
+- Local validation (Windows PowerShell, `RUST_MIN_STACK=16777216`):
+  - `cargo fmt --check` → exit `0`
+  - `cargo clippy --all-targets --all-features -- -D warnings` → exit `0` (0 lint warnings)
+  - `cargo test` → exit `0`:
+    - `src/lib.rs` unit tests: **153 passed; 0 failed; 0 ignored** (+20 new M4 VU unit & end-to-end tests)
+    - `tests/cli_smoke.rs`: **3 passed; 0 failed; 0 ignored**
+    - `tests/roms/main.rs`: **4 passed; 0 failed; 5 ignored**
+  - `cargo test --release --test roms matrix_dillonb_all_26 -- --ignored --nocapture` → exit `0` (**5.29s**): **`26/26 PASS | 0 FAIL | 0 TRAP | 0 TIMEOUT`**.
+  - `cargo test --release --test roms probe_local_carts -- --ignored --nocapture` (**2M cycles**, **0.43s**): **7/8 commercial carts running 2,000,000 cycles cleanly** (zero regressions; MK64 at clean `N64DD_REGS` probe trap).
+  - Forbidden-binary git check → `Clean: no forbidden binaries tracked`.
 
 ### M3 — RSP Scalar Unit, SP MMIO + 2D DMA & `AGENTS.md` Parallel Playbook (`feat/m1-cpu`, 2026-11-27)
 

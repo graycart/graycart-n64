@@ -191,8 +191,8 @@ fn test_cop2_trap() {
     let mut rsp = InterpRsp::new();
     let mut bus = Bus::new(true, false);
 
-    // COP2 instruction
-    write_imem_word(&mut bus, 0, 0x4800_0000);
+    // Reserved COP2 computational funct (bit 25 = 1, funct = 0x3E) MUST trap.
+    write_imem_word(&mut bus, 0, 0x4A00_003E);
 
     bus.sp.pc = 0;
     let res = rsp.step(&mut bus);

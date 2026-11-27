@@ -309,6 +309,30 @@ pub fn step_scalar(rsp: &mut InterpRsp, bus: &mut Bus) -> Result<u64, Trap> {
                 }
             }
         }
+        0x12 => {
+            // COP2 (RSP Vector Unit)
+            if (word & (1 << 25)) == 0 {
+                super::vu_recip::exec_cop2_move(rsp, pc, word)?;
+            } else {
+                match funct {
+                    0x00..=0x11 | 0x13..=0x15 | 0x1D => {
+                        super::vu_arith::exec_vu_arith(rsp, pc, word)?;
+                    }
+                    0x20..=0x2D | 0x33 | 0x37 | 0x3F => {
+                        super::vu_logic_cmp::exec_vu_logic_cmp(rsp, pc, word)?;
+                    }
+                    0x30..=0x32 | 0x34..=0x36 => {
+                        super::vu_recip::exec_vu_recip(rsp, pc, word)?;
+                    }
+                    _ => {
+                        return Err(Trap::UnimplementedOpcode {
+                            pc: u64::from(pc),
+                            word,
+                        });
+                    }
+                }
+            }
+        }
         0x20 => {
             // LB
             let addr = rsp.gpr(rs).wrapping_add(simm);
@@ -353,6 +377,14 @@ pub fn step_scalar(rsp: &mut InterpRsp, bus: &mut Bus) -> Result<u64, Trap> {
             // SW
             let addr = rsp.gpr(rs).wrapping_add(simm);
             rsp.write_dmem_u32(bus, addr, rsp.gpr(rt));
+        }
+        0x32 => {
+            // LWC2 (RSP Vector Load)
+            super::vu_lsu::exec_lwc2(rsp, bus, pc, word)?;
+        }
+        0x3A => {
+            // SWC2 (RSP Vector Store)
+            super::vu_lsu::exec_swc2(rsp, bus, pc, word)?;
         }
         _ => {
             return Err(Trap::UnimplementedOpcode {

@@ -7,6 +7,11 @@
 
 pub mod regs;
 pub mod scalar;
+pub mod vu;
+pub mod vu_arith;
+pub mod vu_logic_cmp;
+pub mod vu_lsu;
+pub mod vu_recip;
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +19,7 @@ use crate::bus::Bus;
 use crate::trap::Trap;
 
 pub use regs::{Sp, SpAction};
+pub use vu::Vu;
 
 /// Size of RSP Data Memory (4 KiB).
 pub const DMEM_SIZE: usize = 4096;
@@ -31,6 +37,8 @@ pub trait RspBackend {
 pub struct InterpRsp {
     /// 32×32-bit Scalar Unit GPRs (`gpr[0]` is hardwired to `0`).
     pub gpr: [u32; 32],
+    /// COP2 Vector Unit (32×128-bit VPR, 48-bit accumulator, VCO/VCC/VCE, RCP/RSQ latches).
+    pub vu: Vu,
     /// Pending branch delay-slot target (12-bit aligned IMEM offset), if active.
     pub next_pc: Option<u16>,
     /// Telemetry: total RSP instructions retired.
@@ -42,6 +50,7 @@ impl InterpRsp {
     pub fn new() -> Self {
         Self {
             gpr: [0; 32],
+            vu: Vu::new(),
             next_pc: None,
             instructions_executed: 0,
         }
@@ -49,6 +58,7 @@ impl InterpRsp {
 
     pub fn reset(&mut self) {
         self.gpr = [0; 32];
+        self.vu.reset();
         self.next_pc = None;
         self.instructions_executed = 0;
     }

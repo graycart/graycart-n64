@@ -322,3 +322,65 @@ fn m3_rsp_scalar_program_dma_and_break_interrupt_end_to_end() {
     );
     assert_ne!(core.cpu.cop0.cause & (1 << 10), 0);
 }
+
+#[test]
+fn m4_rsp_vector_program_lqv_vadd_sqv_end_to_end() {
+    use crate::rsp::Sp;
+
+    let mut cfg = N64Config::accurate();
+    cfg.soft_boot = true;
+    let mut core = N64Core::with_cart(make_idle_cart(), cfg);
+
+    // Seed two 16-byte vectors in DMEM at 0x000 and 0x010:
+    //   vecA = [100, 200, 300, 400, 0x7FFF, -10, 0, 1]
+    //   vecB = [  1,   2,   3,   4,      5, -20, 7, 9]
+    let vec_a: [u16; 8] = [100, 200, 300, 400, 0x7FFF, (-10i16) as u16, 0, 1];
+    let vec_b: [u16; 8] = [1, 2, 3, 4, 5, (-20i16) as u16, 7, 9];
+    for i in 0..8 {
+        let a_b = vec_a[i].to_be_bytes();
+        let b_b = vec_b[i].to_be_bytes();
+        core.bus.sp_dmem[i * 2] = a_b[0];
+        core.bus.sp_dmem[i * 2 + 1] = a_b[1];
+        core.bus.sp_dmem[0x10 + i * 2] = b_b[0];
+        core.bus.sp_dmem[0x10 + i * 2 + 1] = b_b[1];
+    }
+
+    // RSP IMEM program:
+    //   0x00: LQV v1[0], 0x00(r0)   ; sub=4, base=0, vt=1, e=0, off=0
+    //   0x04: LQV v2[0], 0x10(r0)   ; sub=4, base=0, vt=2, e=0, off=1 (1 << 4 = 0x10)
+    //   0x08: VADD v3, v1, v2       ; op=0x12, bit25=1, e=0, vt=2, vs=1, vd=3, funct=0x10
+    //   0x0C: SQV v3[0], 0x20(r0)   ; sub=4, base=0, vt=3, e=0, off=2 (2 << 4 = 0x20)
+    //   0x10: BREAK
+    let prog: [u32; 5] = [
+        (0x32 << 26) | (1 << 16) | (4 << 11),
+        (0x32 << 26) | (2 << 16) | (4 << 11) | 1,
+        (0x12 << 26) | (1 << 25) | (2 << 16) | (1 << 11) | (3 << 6) | 0x10,
+        (0x3A << 26) | (3 << 16) | (4 << 11) | 2,
+        0x0000_000D,
+    ];
+    for (i, &w) in prog.iter().enumerate() {
+        let bytes = w.to_be_bytes();
+        core.bus.sp_imem[i * 4..i * 4 + 4].copy_from_slice(&bytes);
+    }
+
+    // Clear HALT and run N64Core
+    core.bus
+        .write_u32(0x0408_0000, 0, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0404_0010, 1, CacheAttr::Uncached)
+        .unwrap();
+    assert!(matches!(core.run_cycles(100), RunOutcome::Completed { .. }));
+    assert!(core.bus.sp.is_halted());
+    assert_ne!(core.bus.sp.status & Sp::STATUS_BROKE, 0);
+
+    // Check clamped VADD result stored by SQV into DMEM[0x20..0x30]
+    let expected: [u16; 8] = [101, 202, 303, 404, 0x7FFF, (-30i16) as u16, 7, 10];
+    for (i, &exp) in expected.iter().enumerate() {
+        let got = u16::from_be_bytes([
+            core.bus.sp_dmem[0x20 + i * 2],
+            core.bus.sp_dmem[0x20 + i * 2 + 1],
+        ]);
+        assert_eq!(got, exp, "lane {i} mismatch");
+    }
+}
