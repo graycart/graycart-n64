@@ -5,7 +5,7 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 ## Active Milestone
 
-- **Current:** `M2 — Bus + boot` receipts complete on `feat/m1-cpu` (ready for Dave's review & M3 RSP scalar + DMA kickoff)
+- **Current:** `M3 — RSP scalar + DMA` receipts complete on `feat/m1-cpu` (ready for Dave's review & M4 RSP Vector Unit kickoff)
 - **Bespoke Vulkan Compute LLE RDP Name:** **`EdgeWalker`** (zero third-party RDP forks/FFI)
 - **Debugger & UI Standard:** [`docs/13-debugger-and-ui-architecture.md`](./docs/13-debugger-and-ui-architecture.md) (Departure Mono + `btop`-inspired Machine Monitor with live CPU/Memory/GPU/Audio graphs matching `graycart-gb` & `graycart-gba`)
 - **Pre-code gate:** Accepted by Dave on 2026-11-27
@@ -16,9 +16,9 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 |---|---|---|
 | **M0 — Scaffold** | **Done** (PR #2 merged, CI green 3/3 OS) | 21 passed (15 unit, 3 CLI smoke, 3 ROM harness), 0 failed, 3 ignored matrix stubs compiled; fmt/clippy `-D warnings` clean; macOS/Ubuntu/Windows CI green; zero forbidden binaries tracked |
 | **M1 — CPU functional** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | Full VR4300 ISA + COP0/Exceptions + 32-entry TLB + COP1 IEEE-754 FPU + L1 I/D Caches + VR4300 `SRA`/`SRAV` 64-bit hardware quirk; **26/26 Dillonb `n64-tests` PASS** (0 FAIL, 0 TRAP, 0 TIMEOUT) |
-| **M2 — Bus + boot** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | 125 passed (118 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; MI/RI/PI/SI/PIF-HLE/VI/AI registers & scheduled DMA/IRQ wired; **26/26 Dillonb PASS**; **8/8 local commercial carts running 200k cycles with 0 traps** |
-| **M3 — RSP scalar + DMA** | Next | — |
-| **M4 — RSP vector unit** | Not started | — |
+| **M2 — Bus + boot** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | MI/RI/PI/SI/PIF-HLE/VI/AI registers & scheduled DMA/IRQ wired; **26/26 Dillonb PASS**; **8/8 local commercial carts running 200k cycles with 0 traps** |
+| **M3 — RSP scalar + DMA** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | 140 passed (133 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; SP MMIO + 2D skip/count DMA + full 32-bit RSP Scalar Unit + `BREAK`/`COP0` + exact 2/3 RCP scheduling; **26/26 Dillonb PASS**; **7/8 local commercial carts running 2,000,000 cycles cleanly** |
+| **M4 — RSP vector unit** | Next | — |
 | **M5 — Bespoke Software LLE RDP (`CpuRdpLle`) + VI** | Not started | — |
 | **M6 — Bespoke Vulkan Compute LLE RDP (`EdgeWalker`)** | Not started | — |
 | **M7 — Audio (AI + RSP mixer)** | Not started | — |
@@ -29,6 +29,27 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | **M12 — Optional dynarec + Family API extract** | Not started | — |
 
 ## Receipts
+
+### M3 — RSP Scalar Unit, SP MMIO + 2D DMA & `AGENTS.md` Parallel Playbook (`feat/m1-cpu`, 2026-11-27)
+
+- Orchestrator M3.0 seam (single-source-of-truth `Bus.sp` + `sp_dmem` + `sp_imem`, `pa - 0x0404_0000` SP offset routing separating `SP_MEM_ADDR` from `SP_PC` at `0x0408_0000`, atomic `Cell<bool>` `SP_SEMAPHORE`, exact `2/3` RCP cycle scheduling of `InterpRsp::run` in `src/lib.rs`) + 3 parallel `flash_lite` workers (`src/rsp/regs.rs`+`regs_tests.rs`, `src/rsp/scalar.rs`+`scalar_tests.rs`, and comprehensive `AGENTS.md`).
+- Orchestrator line-by-line review caught & fixed before commit:
+  - `src/rsp/regs.rs`: `SP_STATUS` write bits 3..24 were shifted by +1 bit because `CLEAR_BROKE` is a single bit at bit 2 (no `SET_BROKE`); fixed exact 25-bit paired layout (`INTR` bits 3/4, `SSTEP` 5/6, `INTR_ON_BREAK` 7/8, `SIG0..SIG7` 9..24) and fixed 2D DMA `skip` to apply only between rows (`row + 1 < rows`).
+  - `src/rsp/scalar.rs` & `scalar_tests.rs`: link return address uses `normal_next_pc.wrapping_add(4) & 0x0FFC` (delay-slot safe); fixed `SLL`/`SRL` `sa=4` bit encodings in `test_shifts_and_logic`.
+  - `AGENTS.md`: fixed typo (`Refamending` → `Refactoring`) and expanded §6 with full Windows PowerShell validation, Dillonb, local-cart, and forbidden-binary commands.
+  - Added end-to-end M3 integration test `m3_rsp_scalar_program_dma_and_break_interrupt_end_to_end` in `src/tests.rs` (CPU DMAs 12-instruction RSP loop into IMEM, starts RSP with `INTR_ON_BREAK`, RSP loops `sum(1..=5)=15`, writes DMEM, executes `MTC0` SP DMA back to RDRAM, and `BREAK`s raising `MI_INTR_SP → COP0.Cause.IP2`).
+- Local validation (Windows PowerShell, `RUST_MIN_STACK=16777216`):
+  - `cargo fmt --check` → exit `0`
+  - `cargo clippy --all-targets --all-features -- -D warnings` → exit `0` (0 lint warnings)
+  - `cargo test` → exit `0`:
+    - `src/lib.rs` unit tests: **133 passed; 0 failed; 0 ignored** (+15 new M3 SP/RSP unit & end-to-end tests)
+    - `tests/cli_smoke.rs`: **3 passed; 0 failed; 0 ignored**
+    - `tests/roms/main.rs`: **4 passed; 0 failed; 5 ignored**
+  - `cargo test --release --test roms matrix_dillonb_all_26 -- --ignored --nocapture` → exit `0` (**4.98s**): **`26/26 PASS | 0 FAIL | 0 TRAP | 0 TIMEOUT`** (zero regressions).
+  - `cargo test --release --test roms probe_local_carts -- --ignored --nocapture` (**2,000,000 cycles**, local-only `..\carts\n64`, **0.30s**):
+    - **7/8 commercial carts ran 2,000,000 cycles cleanly with ZERO traps** (SM64, GoldenEye 007 in TLB KUSEG `0x702009C8`, Majora's Mask, Ocarina of Time Rev 2, Donkey Kong 64, Star Wars Ep. I Racer, Super Smash Bros.; SM64/GoldenEye/MM actively mutated their RDRAM framebuffer hashes!).
+    - **Mario Kart 64** ran `412,681` cycles cleanly and hit `Trap::UnimplementedRegister { device: "N64DD_REGS", offset: 0x0508, is_write: false }` (`libultra` 64DD presence probe `ASIC_STATUS` — properly trapped per Standing Rule #1).
+  - Forbidden-binary git check → `Clean: no forbidden binaries tracked`.
 
 ### M2 — Bus, Peripherals (MI/RI/PI/SI/PIF/VI/AI) & 26/26 Dillonb CPU Conformance (`feat/m1-cpu`, 2026-11-27)
 

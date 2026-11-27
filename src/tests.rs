@@ -241,3 +241,84 @@ fn m2_ri_select_nonzero_and_vi_v_intr_fires_mi_interrupt() {
         0
     );
 }
+
+#[test]
+fn m3_rsp_scalar_program_dma_and_break_interrupt_end_to_end() {
+    use crate::mi::MI_INTR_SP;
+    use crate::rsp::Sp;
+
+    let mut cfg = N64Config::accurate();
+    cfg.soft_boot = true;
+    let mut core = N64Core::with_cart(make_idle_cart(), cfg);
+
+    // Enable MI_INTR_MASK.SP (bit 1 = set SP mask) so BREAK -> MI_INTR_SP -> COP0.Cause.IP2.
+    core.bus
+        .write_u32(0x0430_000C, 1 << 1, CacheAttr::Uncached)
+        .unwrap();
+
+    // Place a real RSP scalar program in RDRAM at 0x0000_4000 (10 instructions = 40 bytes):
+    //   0x00: ADDIU r1, r0, 5        ; loop counter = 5
+    //   0x04: ADDIU r2, r0, 0        ; accumulator = 0
+    //   0x08: ADD   r2, r2, r1       ; sum += i
+    //   0x0C: BNE   r1, r0, -2       ; loop back to 0x08 if r1 != 0
+    //   0x10: ADDIU r1, r1, -1       ; (delay slot) i--
+    //   0x14: SW    r2, 0(r0)        ; DMEM[0..4] = 15 (5+4+3+2+1)
+    //   0x18: MTC0  r0, c0           ; SP_MEM_ADDR = 0x0000 (DMEM)
+    //   0x1C: ADDIU r3, r0, 0x5000   ; RDRAM dest = 0x0000_5000
+    //   0x20: MTC0  r3, c1           ; SP_DRAM_ADDR = 0x5000
+    //   0x24: ADDIU r4, r0, 7        ; len = 8 bytes
+    //   0x28: MTC0  r4, c3           ; SP_WR_LEN -> DMA DMEM[0..8] -> RDRAM[0x5000..0x5008]
+    //   0x2C: BREAK                  ; halt + set BROKE + assert MI_INTR_SP
+    let program: [u32; 12] = [
+        0x2401_0005, // ADDIU r1, r0, 5
+        0x2402_0000, // ADDIU r2, r0, 0
+        0x0041_1020, // ADD   r2, r2, r1
+        0x1420_FFFE, // BNE   r1, r0, -2 (target = 0x10 + (-8) = 0x08)
+        0x2421_FFFF, // ADDIU r1, r1, -1 (delay slot)
+        0xAC02_0000, // SW    r2, 0(r0)
+        0x4080_0000, // MTC0  r0, c0 (SP_MEM_ADDR)
+        0x2403_5000, // ADDIU r3, r0, 0x5000
+        0x4083_0800, // MTC0  r3, c1 (SP_DRAM_ADDR)
+        0x2404_0007, // ADDIU r4, r0, 7
+        0x4084_1800, // MTC0  r4, c3 (SP_WR_LEN)
+        0x0000_000D, // BREAK
+    ];
+    for (i, &word) in program.iter().enumerate() {
+        core.bus
+            .write_u32(0x0000_4000 + (i as u32) * 4, word, CacheAttr::Uncached)
+            .unwrap();
+    }
+
+    // CPU DMAs the program from RDRAM 0x4000 -> RSP IMEM (0x1000), 48 bytes (len = 47).
+    core.bus
+        .write_u32(0x0404_0000, 0x1000, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0404_0004, 0x4000, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0404_0008, 47, CacheAttr::Uncached)
+        .unwrap();
+
+    // Set SP_PC = 0, then clear HALT (bit 0) + set INTR_ON_BREAK (bit 8).
+    core.bus
+        .write_u32(0x0408_0000, 0, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0404_0010, (1 << 0) | (1 << 8), CacheAttr::Uncached)
+        .unwrap();
+    assert!(!core.bus.sp.is_halted());
+
+    // Step N64Core so scheduler drives RSP via exact 2/3 RCP clock ratio.
+    assert!(matches!(core.run_cycles(200), RunOutcome::Completed { .. }));
+
+    // Verify RSP finished, halted with BROKE, DMA'd sum(1..=5)=15 to RDRAM[0x5000], and raised SP IRQ!
+    assert!(core.bus.sp.is_halted());
+    assert_ne!(core.bus.sp.status & Sp::STATUS_BROKE, 0);
+    assert_eq!(core.bus.read_u32(0x0000_5000, CacheAttr::Uncached), Ok(15));
+    assert_ne!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_SP,
+        0
+    );
+    assert_ne!(core.cpu.cop0.cause & (1 << 10), 0);
+}

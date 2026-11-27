@@ -159,6 +159,8 @@ impl N64Core {
         self.scheduler.reset();
         self.scheduler.single_step_mode = self.config.single_step_mode;
         self.cpu.reset();
+        self.rsp.reset();
+        self.bus.sp.reset();
         self.bus.pif.seed_boot_ram(cic);
         self.bus.pending_events.clear();
         self.bus.pending_pi_len = 0;
@@ -203,7 +205,18 @@ impl N64Core {
                     for (delay, kind) in self.bus.drain_pending_events() {
                         self.scheduler.schedule_after(delay, kind);
                     }
-                    self.scheduler.advance(step);
+                    let rcp_cycles = self.scheduler.advance(step);
+                    if rcp_cycles > 0 && !self.bus.sp.is_halted() {
+                        if let Err(trap) = self.rsp.run(&mut self.bus, rcp_cycles) {
+                            return RunOutcome::Trapped {
+                                cycles: self.scheduler.now_cpu_cycles().saturating_sub(start),
+                                trap,
+                            };
+                        }
+                        for (delay, kind) in self.bus.drain_pending_events() {
+                            self.scheduler.schedule_after(delay, kind);
+                        }
+                    }
                     while let Some(ev) = self.scheduler.pop_due() {
                         match ev.kind {
                             EventKind::CompareMatch => {
@@ -235,7 +248,7 @@ impl N64Core {
                                 }
                             }
                             EventKind::SpDmaComplete => {
-                                self.bus.mi.set_intr(mi::MI_INTR_SP);
+                                self.bus.complete_sp_dma();
                             }
                         }
                     }

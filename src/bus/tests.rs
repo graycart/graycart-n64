@@ -146,10 +146,10 @@ fn unimplemented_mmio_registers_trap_instead_of_returning_zero() {
         })
     );
     assert_eq!(
-        bus.read_u32(0x0404_0000, CacheAttr::Uncached),
+        bus.read_u32(0x0404_00FC, CacheAttr::Uncached),
         Err(Trap::UnimplementedRegister {
             device: "SP",
-            offset: 0x0000,
+            offset: 0x00FC,
             is_write: false,
         })
     );

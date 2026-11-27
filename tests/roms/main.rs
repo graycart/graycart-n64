@@ -201,10 +201,10 @@ fn probe_local_carts() {
     roms.sort();
 
     println!(
-        "\n{:<36} {:<8} {:<10} {:>10} {:>10}  STATUS",
-        "LOCAL CART", "CIC", "ENTRY", "CYCLES", "INSTS"
+        "\n{:<36} {:<8} {:<10} {:>10} {:>10} {:>7}  STATUS",
+        "LOCAL CART", "CIC", "ENTRY", "CYCLES", "CPU_INST", "RSP_DMA"
     );
-    println!("{}", "-".repeat(115));
+    println!("{}", "-".repeat(124));
 
     for rom in &roms {
         let name = rom.file_name().unwrap().to_string_lossy();
@@ -220,18 +220,20 @@ fn probe_local_carts() {
         let mut cfg = N64Config::accurate();
         cfg.soft_boot = true;
         let mut core = N64Core::with_cart(cart, cfg);
-        let status = match core.run_cycles(200_000) {
+        let status = match core.run_cycles(2_000_000) {
             RunOutcome::Completed { .. } => format!(
-                "RUNNING (PC 0x{:016X}, fb_hash {:016x})",
+                "RUNNING (PC 0x{:016X}, rsp_inst {}, fb_hash {:016x})",
                 core.cpu.pc(),
+                core.rsp.instructions_executed,
                 core.framebuffer_hash()
             ),
             RunOutcome::Trapped { trap, .. } => format!("TRAP: {trap}"),
         };
         println!(
-            "{name:<36} {cic:<8} {entry:<10} {:>10} {:>10}  {status}",
+            "{name:<36} {cic:<8} {entry:<10} {:>10} {:>10} {:>7}  {status}",
             core.scheduler.now_cpu_cycles(),
-            core.cpu.instructions_executed()
+            core.cpu.instructions_executed(),
+            core.bus.sp.dma_count
         );
     }
 }

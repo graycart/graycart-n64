@@ -14,12 +14,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::{Ai, AiAction};
 use crate::cart::Cart;
-use crate::mi::{Mi, MI_INTR_AI, MI_INTR_PI, MI_INTR_SI, MI_INTR_VI};
+use crate::mi::{Mi, MI_INTR_AI, MI_INTR_PI, MI_INTR_SI, MI_INTR_SP, MI_INTR_VI};
 use crate::pi::{Pi, PiAction};
 use crate::pif::Pif;
 use crate::rdp::CpuRdpLle;
 use crate::ri::Ri;
-use crate::rsp::{DMEM_SIZE, IMEM_SIZE};
+use crate::rsp::{Sp, SpAction, DMEM_SIZE, IMEM_SIZE};
 use crate::schedule::EventKind;
 use crate::si::{Si, SiAction};
 use crate::trap::Trap;
@@ -133,10 +133,12 @@ pub const fn is_rcp_window(pa: u32) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bus {
     pub rdram: Rdram,
-    /// Mirror of RSP DMEM (`0x0400_0000..=0x0400_0FFF`) for CPU SysAD access.
+    /// RSP DMEM (`0x0400_0000..=0x0400_0FFF`, single source of truth for CPU & RSP).
     pub sp_dmem: Vec<u8>,
-    /// Mirror of RSP IMEM (`0x0400_1000..=0x0400_1FFF`) for CPU SysAD access.
+    /// RSP IMEM (`0x0400_1000..=0x0400_1FFF`, single source of truth for CPU & RSP).
     pub sp_imem: Vec<u8>,
+    /// RSP (SP) MMIO registers and 2D DMA state (`0x0404_0000..=0x040B_FFFF`).
+    pub sp: Sp,
     pub mi: Mi,
     pub vi: Vi,
     pub ai: Ai,
@@ -161,6 +163,7 @@ impl Bus {
             rdram: Rdram::new(expansion_pak),
             sp_dmem: vec![0; DMEM_SIZE],
             sp_imem: vec![0; IMEM_SIZE],
+            sp: Sp::new(),
             mi: Mi::new(),
             vi: Vi::new(),
             ai: Ai::new(),
@@ -193,6 +196,11 @@ impl Bus {
     pub fn complete_si_dma(&mut self) {
         self.si.complete_dma();
         self.mi.set_intr(MI_INTR_SI);
+    }
+
+    /// Complete an in-flight SP DMA (clears `SP_STATUS.DMA_BUSY`).
+    pub fn complete_sp_dma(&mut self) {
+        self.sp.complete_dma();
     }
 
     /// Execute immediate-data Cart → RDRAM PI DMA copy (interrupt delayed per §3.3).
@@ -434,6 +442,7 @@ impl Bus {
                     self.sp_imem[idx + 3],
                 ]))
             }
+            PhysRegion::RspRegs => self.sp.read_reg(pa - 0x0404_0000),
             PhysRegion::MiRegs => self.mi.read_reg(pa & 0xFFFF),
             PhysRegion::ViRegs => self.vi.read_reg(pa & 0xFFFF),
             PhysRegion::AiRegs => self.ai.read_reg(pa & 0xFFFF),
@@ -486,6 +495,56 @@ impl Bus {
             PhysRegion::RspImem => {
                 let idx = (pa & 0x0FFF) as usize;
                 self.sp_imem[idx..idx + 4].copy_from_slice(&val.to_be_bytes());
+                Ok(())
+            }
+            PhysRegion::RspRegs => {
+                match self.sp.write_reg_action(pa - 0x0404_0000, val)? {
+                    SpAction::StartDmaRd {
+                        mem_addr,
+                        dram_addr,
+                        len_reg,
+                        delay_cycles,
+                    } => {
+                        self.sp.execute_dma_rd(
+                            &self.rdram,
+                            &mut self.sp_dmem,
+                            &mut self.sp_imem,
+                            mem_addr,
+                            dram_addr,
+                            len_reg,
+                        );
+                        if delay_cycles == 0 {
+                            self.sp.complete_dma();
+                        } else {
+                            self.pending_events
+                                .push((delay_cycles, EventKind::SpDmaComplete));
+                        }
+                    }
+                    SpAction::StartDmaWr {
+                        mem_addr,
+                        dram_addr,
+                        len_reg,
+                        delay_cycles,
+                    } => {
+                        self.sp.execute_dma_wr(
+                            &mut self.rdram,
+                            &self.sp_dmem,
+                            &self.sp_imem,
+                            mem_addr,
+                            dram_addr,
+                            len_reg,
+                        );
+                        if delay_cycles == 0 {
+                            self.sp.complete_dma();
+                        } else {
+                            self.pending_events
+                                .push((delay_cycles, EventKind::SpDmaComplete));
+                        }
+                    }
+                    SpAction::ClearIntr => self.mi.clear_intr(MI_INTR_SP),
+                    SpAction::SetIntr => self.mi.set_intr(MI_INTR_SP),
+                    SpAction::None => {}
+                }
                 Ok(())
             }
             PhysRegion::MiRegs => self.mi.write_reg(pa & 0xFFFF, val),
