@@ -5,8 +5,8 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 ## Active Milestone
 
-- **Current:** `M5.0 — Bus.rdp seam` receipt recorded on `feat/m1-cpu` — **seam validation-green** (not full M5). Final gate **179 passed** (**172** library + **3** CLI smoke + **4** ROM harness), **0 failed**, **5 ignored**. Dillonb **26/26**. Local carts **7/8** at 2M cycles. TMEM / raster / combiner / VI RGBA8888 still next. M4 RSP vector receipts remain ready for Dave's review.
-- **Branch / HEAD:** `feat/m1-cpu` (local feature branch, 7 commits ahead of `origin/main` `28a507a` including this M5.0 receipt commit, not yet pushed/PR'd)
+- **Current:** `M5 W1–W4 — CpuRdpLle` landed **uncommitted** on `feat/m1-cpu` after M5.0 commit `d89d417` — wave in tree, **not** human-blessed Done. Final reconfirm: `cargo fmt --check` PASS; `cargo clippy --all-targets --all-features -- -D warnings` PASS; `cargo test` **241 passed; 0 failed; 5 ignored** (234 lib + 3 CLI + 4 roms); Dillonb **26/26**; local carts **7/8**; hygiene clean. Remaining traps include `SetConvert`/`SetKey*`, COPY/AA and other exotic blender modes. M5.0 seam stays the last commit (`d89d417`, **179 passed**). M4 RSP vector receipts remain ready for Dave's review.
+- **Branch / HEAD:** `feat/m1-cpu` at `d89d417` (local feature branch, 7 commits ahead of `origin/main` `28a507a`, not yet pushed/PR'd). M5 W1–W4 is dirty working tree on top of `d89d417` — **no wave commit hash**.
 - **Bespoke Vulkan Compute LLE RDP Name:** **`EdgeWalker`** (zero third-party RDP forks/FFI)
 - **Debugger & UI Standard:** [`docs/13-debugger-and-ui-architecture.md`](./docs/13-debugger-and-ui-architecture.md) (Departure Mono + `btop`-inspired Machine Monitor with live CPU/Memory/GPU/Audio graphs matching `graycart-gb` & `graycart-gba`)
 - **Pre-code gate:** Accepted by Dave on 2026-11-27
@@ -22,17 +22,19 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
   4. `c3b5b15` — M3 RSP Scalar Unit, SP MMIO + 2D skip/count DMA, exact `2/3` RCP scheduling, and upgraded [`AGENTS.md`](./AGENTS.md) parallel playbook (3 parallel `flash_lite` workers)
   5. `724663c` — M4 RSP Vector Unit (`LWC2`/`SWC2` + 8×8 transpose, 22 arith/MAC ops w/ 48-bit acc, 17 compare/clip/logic ops, `MFC2`/`MTC2`/`CFC2`/`CTC2`, zero-float integer 512-entry `RCP`/`RSQ` ROMs; 4 parallel `flash_lite` workers)
   6. `48b4cd3` — M0–M4 session handoff snapshot and M5 parallel kickoff blueprint
+  7. `d89d417` — M5.0 Bus.rdp single-source-of-truth DPC/DPS seam + `SyncFull` → `MI_INTR_DP`. M5 W1–W4 `CpuRdpLle` is **uncommitted** on top of this commit (no wave hash).
 - **Already-Fetched Local Fixtures (gitignored, never commit):**
   - `tests/fixtures/fetched/dillonb/` (26 standard `.z64` ROMs)
   - `tests/fixtures/fetched/dillonb-simpleboot/` (26 `*_simpleboot.z64` ROMs — **26/26 PASS in ~5s `--release`**)
   - `tests/fixtures/fetched/n64memtest/n64memtest.z64` (v0.9)
   - Local commercial smoke ROMs live outside the submodule in `..\carts\n64` (**8 `.z64` carts**, local-only, NEVER commit; `probe_local_carts` runs 2M cycles in ~0.4s `--release` with 7/8 running cleanly and Mario Kart 64 hitting clean `N64DD_REGS 0x0508` presence-probe trap).
-- **M5.0 Bus.rdp seam final gate (`M5 — Bespoke Software LLE RDP CpuRdpLle + VI Scanout`):** worker model `grok-4.7-high`. RDP state lives only on `Bus.rdp` (orphaned throwaway `CpuRdpLle::new()` / `N64Core.rdp` removed). `RaiseDpIntr` → `MI_INTR_DP`. End-to-end `m5_0_bus_rdp_persistent_mmio_and_syncfull_mi_intr_dp` passing; **18** RDP unit tests passing. Final gate: **179 passed** = **172** library + **3** CLI smoke + **4** ROM harness; **0 failed**; **5 ignored** (default roms matrix stubs). Dillonb **26/26 PASS | 0 FAIL | 0 TRAP | 0 TIMEOUT**. Local carts **7/8** clean at 2M cycles; Mario Kart 64 same clean `N64DD_REGS` presence-probe trap at offset `0x0508`. Hygiene clean (no forbidden binaries). Zero failures; zero Orchestrator code fixes during the final gate. `regs_tests`: offset `0x20` is the `DPC_START` mirror via `& 0x1F`; unknown-offset trap uses `0x02`. This is a seam receipt only — full M5 (TMEM / raster / combiner / VI RGBA8888) is still next and is **not** Done.
+- **M5.0 Bus.rdp seam final gate (`M5 — Bespoke Software LLE RDP CpuRdpLle + VI Scanout`):** worker model `grok-4.7-high`. RDP state lives only on `Bus.rdp` (orphaned throwaway `CpuRdpLle::new()` / `N64Core.rdp` removed). `RaiseDpIntr` → `MI_INTR_DP`. End-to-end `m5_0_bus_rdp_persistent_mmio_and_syncfull_mi_intr_dp` passing; **18** RDP unit tests passing. Final gate: **179 passed** = **172** library + **3** CLI smoke + **4** ROM harness; **0 failed**; **5 ignored** (default roms matrix stubs). Dillonb **26/26 PASS | 0 FAIL | 0 TRAP | 0 TIMEOUT**. Local carts **7/8** clean at 2M cycles; Mario Kart 64 same clean `N64DD_REGS` presence-probe trap at offset `0x0508`. Hygiene clean (no forbidden binaries). Zero failures; zero Orchestrator code fixes during the final gate. `regs_tests`: offset `0x20` is the `DPC_START` mirror via `& 0x1F`; unknown-offset trap uses `0x02`. Seam receipt only (commit `d89d417`). Follow-on W1–W4 is uncommitted on top of that commit and is **not** human-blessed Done.
   - Orchestrator M5.0 seam: `CpuRdpLle` on `Bus` (`pub rdp: CpuRdpLle`) as single source of truth for `0x0410_0000..=0x042F_FFFF` (DPC/DPS regs + XBUS DMEM / RDRAM ring-buffer DMA + `MI_INTR_DP` on `SyncFull`). Planned disjoint files:
     1. `src/rdp/regs.rs` + `regs_tests.rs` — DPC/DPS MMIO regs, 10-bit paired `DPC_STATUS`, command FIFO decoder & dispatch.
     2. `src/rdp/tmem.rs` + `tmem_tests.rs` — 4 KiB TMEM + `SetTile`/`SetTileSize`/`LoadTile`/`LoadBlock`/`LoadTlut` + texel sampler.
     3. `src/rdp/raster.rs` + `raster_tests.rs` — Edge-walker triangle rasterizer, `FillRectangle`, `TextureRectangle`/`Flip`, scissor clip, color/Z-buffer + 9th-bit coverage R/W.
     4. `src/rdp/combine_blend.rs` + `combine_blend_tests.rs` + VI RGBA8888 scanout — 1-cycle/2-cycle Color Combiner, Blender, `SyncFull` → `MI_INTR_DP`, and VI RGBA16/RGBA32 framebuffer scanout for golden hash/PNG verification (the software oracle for M6 bespoke Vulkan compute **`EdgeWalker`**).
+- **M5 W1–W4 CpuRdpLle (uncommitted, after `d89d417`):** worker model `grok-4.7-high`. No wave commit hash. W1 FIFO fetch + multi-word decoder + state setters, hooked to TMEM + `draw_primitive`. W2 4 KiB TMEM, 8 tiles, loads, sampler (**13** tests; clippy args bundled). W3 edge-walker triangles/rects/scissor/Z/coverage (**18** tests). W4 combiner/blender + VI RGBA8888 scanout (**15+9** tests). Final reconfirm: `cargo fmt --check` PASS; `cargo clippy --all-targets --all-features -- -D warnings` PASS; `cargo test` **241 passed; 0 failed; 5 ignored** (234 lib + 3 CLI + 4 roms); Dillonb **26/26**; local carts **7/8**; hygiene clean. Still trapping: `SetConvert`/`SetKey*`, COPY/AA and other exotic blender modes. M5 is **not** Done. Dirty paths: `src/bus/mod.rs`, `src/rdp/{mod,regs,regs_tests,tmem,tmem_tests,raster,raster_tests,combine_blend,combine_blend_tests}.rs`, `src/vi/{mod,tests}.rs`.
 
 ## Milestone Ledger (M0–M12)
 
@@ -43,7 +45,7 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | **M2 — Bus + boot** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | MI/RI/PI/SI/PIF-HLE/VI/AI registers & scheduled DMA/IRQ wired; **26/26 Dillonb PASS**; **8/8 local commercial carts running 200k cycles with 0 traps** |
 | **M3 — RSP scalar + DMA** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | SP MMIO + 2D skip/count DMA + full 32-bit RSP Scalar Unit + `BREAK`/`COP0` + exact 2/3 RCP scheduling; **26/26 Dillonb PASS**; **7/8 local commercial carts running 2,000,000 cycles cleanly** |
 | **M4 — RSP vector unit** | **Receipts ready (`feat/m1-cpu`, awaiting Dave's review)** | 160 passed (153 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; full 32×128-bit VU (`LWC2`/`SWC2` + 8×8 transpose, 22 arith/MAC ops w/ 48-bit acc, 17 compare/clip/logic ops, `MFC2`/`MTC2`/`CFC2`/`CTC2`, zero-float integer `RCP`/`RSQ` 512-entry ROMs); **26/26 Dillonb PASS** |
-| **M5 — Bespoke Software LLE RDP (`CpuRdpLle`) + VI** | In progress (M5.0 Bus.rdp seam receipt recorded; full M5 not Done) | Seam only: **179 passed** (**172** lib + **3** CLI smoke + **4** ROM harness), **0 failed**, **5 ignored**; Dillonb **26/26 PASS**; local carts **7/8** at 2M (MK64 `N64DD_REGS` `0x0508`); hygiene clean; **18** RDP unit tests. TMEM/raster/combiner/VI RGBA8888 still next |
+| **M5 — Bespoke Software LLE RDP (`CpuRdpLle`) + VI** | In progress (W1–W4 uncommitted on `feat/m1-cpu` after `d89d417`; not human-blessed Done; final CI reconfirm PASS) | W1 FIFO/decoder/setters hooked to TMEM + `draw_primitive`; W2 4 KiB TMEM + 8 tiles + sampler (**13** tests); W3 edge-walker (**18** tests); W4 combiner/blender + VI RGBA8888 (**15+9** tests). Final reconfirm: `cargo fmt --check` PASS; `cargo clippy --all-targets --all-features -- -D warnings` PASS; `cargo test` **241 passed; 0 failed; 5 ignored** (234 lib + 3 CLI + 4 roms); Dillonb **26/26**; carts **7/8**; hygiene clean. Still trapping: `SetConvert`/`SetKey*`, COPY/AA exotic blender modes. M5.0 seam commit remains `d89d417` (**179 passed**) |
 | **M6 — Bespoke Vulkan Compute LLE RDP (`EdgeWalker`)** | Not started | — |
 | **M7 — Audio (AI + RSP mixer)** | Not started | — |
 | **M8 — PIF/Joybus/Saves/4-port Transfer Pak** | Not started | — |
@@ -54,9 +56,22 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 ## Receipts
 
-### M5.0 — Bus.rdp seam (`feat/m1-cpu`, 2026-11-27)
+### M5 W1–W4 — `CpuRdpLle` (`feat/m1-cpu`, uncommitted on top of `d89d417`, 2026-11-27)
 
-Seam receipt only. Full M5 (TMEM / raster / combiner / VI RGBA8888) is still next; M5 is **not** Done.
+Wave receipt only. Landed as uncommitted working tree after M5.0 commit `d89d417`. **No wave commit hash.** M5 is **not** human-blessed Done. Final CI reconfirm PASS.
+
+- **Worker model:** `grok-4.7-high`
+- **W1:** FIFO fetch + multi-word decoder + state setters; hooked to TMEM + `draw_primitive`.
+- **W2:** 4 KiB TMEM, 8 tiles, loads, sampler (**13** tests); clippy args bundled.
+- **W3:** edge-walker triangles / rects / scissor / Z / coverage (**18** tests).
+- **W4:** combiner/blender + VI RGBA8888 scanout (**15+9** tests).
+- **Dirty paths (no commit):** `src/bus/mod.rs`, `src/rdp/mod.rs`, `src/rdp/regs.rs`, `src/rdp/regs_tests.rs`, `src/rdp/tmem.rs`, `src/rdp/tmem_tests.rs`, `src/rdp/raster.rs`, `src/rdp/raster_tests.rs`, `src/rdp/combine_blend.rs`, `src/rdp/combine_blend_tests.rs`, `src/vi/mod.rs`, `src/vi/tests.rs`.
+- **Final reconfirm:** `cargo fmt --check` PASS; `cargo clippy --all-targets --all-features -- -D warnings` PASS; `cargo test` **241 passed; 0 failed; 5 ignored** (234 lib + 3 CLI + 4 roms); Dillonb **26/26**; local carts **7/8**; hygiene clean.
+- **Still trapping (not Done):** `SetConvert` / `SetKey*`, COPY/AA and other exotic blender modes, and related unimplemented RDP paths (trap, don't stub).
+
+### M5.0 — Bus.rdp seam (`feat/m1-cpu`, commit `d89d417`, 2026-11-27)
+
+Seam receipt only (this commit). W1–W4 follow-on is the uncommitted receipt above. M5 is **not** Done.
 
 - **Worker model:** `grok-4.7-high`
 - **Seam:** RDP state lives only on `Bus.rdp`. Orphaned throwaway `CpuRdpLle::new()` and `N64Core.rdp` removed. `RaiseDpIntr` → `MI_INTR_DP`.

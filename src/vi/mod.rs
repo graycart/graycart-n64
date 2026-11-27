@@ -1,7 +1,31 @@
-//! Video Interface (VI) register file and register-driven scanline timing (`0x0440_0000..=0x044F_FFFF`).
+//! Video Interface (VI) register file, scanline timing, and RGBA8888 scanout
+//! (`0x0440_0000..=0x044F_FFFF`).
 //!
 //! Cited: N64brew — Video Interface
 //!   https://n64brew.dev/wiki/Video_Interface · docs/04-rdp.md
+//!
+//! `VI_CTRL` TYPE[1:0] selects the framebuffer format consumed by
+//! [`Vi::scanout_rgba8888`]:
+//! - `00` — VI off. The scanout is a 0×0 frame (no pixels fetched).
+//! - `01` — reserved. Scanout traps.
+//! - `10` — 16-bit. RDRAM stores a big-endian 5/5/5/1 halfword
+//!   (`RRRR RGGG GGBB BBBA`). n64brew calls the mode 5/5/5/3 because the
+//!   analog path also folds in two RDRAM 9th bits; this unfiltered scanout
+//!   does not. 5-bit channels expand by replication `(v << 3) | (v >> 2)`.
+//!   The alpha bit expands to `0x00` or `0xFF`.
+//! - `11` — 32-bit big-endian `R,G,B,A`, copied through.
+//!
+//! Width is `VI_WIDTH`. Height is the inclusive source-row span of the
+//! vertical accumulator: it starts at `Y_OFFSET` (0.10) and adds `Y_SCALE`
+//! (2.10, the reciprocal of the scale-up) once per active output line.
+//! Active lines are `(V_END - V_START) / 2` half-lines from `VI_V_VIDEO`.
+//! `Y_SCALE = 0x400` is 1:1 (one source row per output line).
+//!
+//! Gamma, gamma dither, divot, dedither, and any `AA_MODE` other than
+//! REPLICATE (3) trap. They are not applied, so a host cannot treat this
+//! buffer as a filtered television picture. `SERRATE` does not weave fields;
+//! field selection on hardware is an `VI_ORIGIN` change, and this reads the
+//! bytes at the current origin in storage order.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +36,29 @@ use crate::trap::Trap;
 pub enum ViAction {
     None,
     ClearIntr,
+}
+
+/// Framebuffer format selected by `VI_CTRL` TYPE[1:0].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ViColorType {
+    /// TYPE `00`. VI is off.
+    Off = 0,
+    /// TYPE `10`. Big-endian 5/5/5/1 in RDRAM.
+    Rgba16 = 2,
+    /// TYPE `11`. Big-endian 8/8/8/8 in RDRAM.
+    Rgba32 = 3,
+}
+
+/// Unfiltered RGBA8888 picture produced by [`Vi::scanout_rgba8888`].
+///
+/// `rgba` is row-major, 4 bytes per pixel, order R, G, B, A.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rgba8888Frame {
+    pub width: u32,
+    pub height: u32,
+    pub color_type: ViColorType,
+    pub rgba: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +263,173 @@ impl Vi {
         }
         hash
     }
+
+    /// `VI_CTRL` TYPE[1:0]. Reserved TYPE `01` traps.
+    pub fn color_type(&self) -> Result<ViColorType, Trap> {
+        match self.ctrl & 0b11 {
+            0 => Ok(ViColorType::Off),
+            2 => Ok(ViColorType::Rgba16),
+            3 => Ok(ViColorType::Rgba32),
+            _ => Err(Trap::UnimplementedRegister {
+                device: "VI_CTRL.TYPE",
+                offset: 1,
+                is_write: false,
+            }),
+        }
+    }
+
+    /// Active output lines: `(V_END - V_START) / 2` half-lines from `VI_V_VIDEO`.
+    #[must_use]
+    pub fn active_output_lines(&self) -> u32 {
+        let start = (self.v_video >> 16) & 0x3FF;
+        let end = self.v_video & 0x3FF;
+        end.saturating_sub(start) / 2
+    }
+
+    /// Source rows covered by the vertical scaler, including the last row landed on.
+    ///
+    /// The accumulator starts at `Y_OFFSET` (bits 25:16, 0.10) and adds
+    /// `Y_SCALE` (bits 11:0, 2.10) once per active output line. The integer
+    /// part (`>> 10`) is the framebuffer row.
+    #[must_use]
+    pub fn scanout_height(&self) -> u32 {
+        let lines = self.active_output_lines();
+        if lines == 0 {
+            return 0;
+        }
+        let y_offset = (self.y_scale >> 16) & 0x3FF;
+        let y_step = u64::from(self.y_scale & 0xFFF);
+        let last = u64::from(y_offset) + u64::from(lines - 1) * y_step;
+        u32::try_from(last / 1024)
+            .unwrap_or(u32::MAX)
+            .saturating_add(1)
+    }
+
+    /// Expand the RDRAM framebuffer to tightly packed RGBA8888.
+    ///
+    /// See the module docs for TYPE selection, the row count, and which
+    /// `VI_CTRL` filter bits trap. `VI_ORIGIN` must be 8-byte aligned when
+    /// any pixel is read, and the row stride must be a multiple of 8 bytes
+    /// (16-bit width multiple of 4, 32-bit width multiple of 2). Bytes past
+    /// installed RDRAM read as 0.
+    pub fn scanout_rgba8888(&self, rdram: &Rdram) -> Result<Rgba8888Frame, Trap> {
+        let color_type = self.color_type()?;
+        if color_type == ViColorType::Off {
+            return Ok(Rgba8888Frame {
+                width: 0,
+                height: 0,
+                color_type,
+                rgba: Vec::new(),
+            });
+        }
+        if unsupported_vi_filter(self.ctrl) {
+            return Err(Trap::UnimplementedRegister {
+                device: "VI_SCANOUT",
+                offset: self.ctrl & 0x0001_FFFF,
+                is_write: false,
+            });
+        }
+        let width = self.width & 0x0FFF;
+        let height = self.scanout_height();
+        let bpp: u32 = if color_type == ViColorType::Rgba32 {
+            4
+        } else {
+            2
+        };
+        let mut rgba = Vec::new();
+        if width == 0 || height == 0 {
+            return Ok(Rgba8888Frame {
+                width,
+                height,
+                color_type,
+                rgba,
+            });
+        }
+        let origin = self.origin & 0x00FF_FFFF;
+        let stride = width.saturating_mul(bpp);
+        if origin & 7 != 0 || stride & 7 != 0 {
+            return Err(Trap::MisalignedAccess {
+                pa: origin,
+                size: 8,
+            });
+        }
+        let bytes = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        rgba.reserve(bytes);
+        for y in 0..height {
+            let row = origin.saturating_add(y.saturating_mul(stride));
+            for x in 0..width {
+                let addr = row.saturating_add(x.saturating_mul(bpp));
+                if color_type == ViColorType::Rgba32 {
+                    let pix = rdram.read_u32(addr).unwrap_or(0);
+                    rgba.extend_from_slice(&pix.to_be_bytes());
+                } else {
+                    let pix = rdram.read_u16(addr).unwrap_or(0);
+                    rgba.extend_from_slice(&expand_5551(pix));
+                }
+            }
+        }
+        Ok(Rgba8888Frame {
+            width,
+            height,
+            color_type,
+            rgba,
+        })
+    }
+
+    /// FNV-1a 64 of [`Self::scanout_rgba8888`], prefixed with width, height, and TYPE.
+    ///
+    /// Distinct from [`Self::framebuffer_hash`], which hashes raw RDRAM bytes.
+    pub fn scanout_frame_hash(&self, rdram: &Rdram) -> Result<u64, Trap> {
+        Ok(hash_rgba8888_frame(&self.scanout_rgba8888(rdram)?))
+    }
+}
+
+/// Gamma, gamma-dither, divot, dedither, or an `AA_MODE` other than REPLICATE.
+fn unsupported_vi_filter(ctrl: u32) -> bool {
+    const GAMMA_DITHER: u32 = 1 << 2;
+    const GAMMA: u32 = 1 << 3;
+    const DIVOT: u32 = 1 << 4;
+    const DEDITHER: u32 = 1 << 16;
+    let filters = ctrl & (GAMMA_DITHER | GAMMA | DIVOT | DEDITHER);
+    let aa_mode = (ctrl >> 8) & 0b11;
+    filters != 0 || aa_mode != 0b11
+}
+
+fn expand_5551(pix: u16) -> [u8; 4] {
+    let expand5 = |v: u16| -> u8 {
+        let v = (v & 0x1F) as u8;
+        (v << 3) | (v >> 2)
+    };
+    let a = if pix & 1 == 0 { 0 } else { 0xFF };
+    [expand5(pix >> 11), expand5(pix >> 6), expand5(pix >> 1), a]
+}
+
+/// FNV-1a 64 over `b"GCVI"`, little-endian width, little-endian height, TYPE, then pixels.
+#[must_use]
+pub fn hash_rgba8888_frame(frame: &Rgba8888Frame) -> u64 {
+    const OFFSET: u64 = 0xCBF2_9CE4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01B3;
+    let mut hash = OFFSET;
+    let mut mix = |b: u8| {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(PRIME);
+    };
+    for b in b"GCVI" {
+        mix(*b);
+    }
+    for b in frame.width.to_le_bytes() {
+        mix(b);
+    }
+    for b in frame.height.to_le_bytes() {
+        mix(b);
+    }
+    mix(frame.color_type as u8);
+    for &b in &frame.rgba {
+        mix(b);
+    }
+    hash
 }
 
 #[cfg(test)]

@@ -1,10 +1,14 @@
-//! DPC/DPS MMIO and the M5.0 command-list walk.
+//! DPC/DPS MMIO and the RDP command-list decoder.
 //!
 //! Cited: N64brew — Reality Display Processor/Interface
 //!   https://n64brew.dev/wiki/Reality_Display_Processor/Interface
-//! Cited: N64brew — Reality Display Processor/Commands (`Sync Full` 0x29)
+//! Cited: N64brew — Reality Display Processor/Commands
 //!   https://n64brew.dev/wiki/Reality_Display_Processor/Commands
 //!   docs/04-rdp.md
+//!
+//! Command id is bits [61:56]. Triangle length follows the shade / texture /
+//! z bits in that id (base 4 words, +8 shade, +8 texture, +2 depth, max 22).
+//! Texture rectangles are 2 words. Every other opcode is 1 word.
 //!
 //! `Bus` passes `offset = pa & 0xFFFF`. DPC aliases every 0x20 across
 //! `0x0410_0000..=0x041F_FFFF`. DPS implements only `0x00/0x04/0x08/0x0C`;
@@ -18,7 +22,7 @@ use crate::bus::Rdram;
 use crate::rdp::combine_blend;
 use crate::rdp::raster;
 use crate::rdp::tmem;
-use crate::rdp::{CpuRdpLle, RdpAction, RdpSyncKind};
+use crate::rdp::{CpuRdpLle, RdpAction, RdpImageState, RdpScissor, RdpSyncKind};
 use crate::trap::Trap;
 
 /// `DPC_START` / `DPC_END` / `DPC_CURRENT`: bits 23:0, 8-byte aligned.
@@ -27,7 +31,25 @@ const DPC_STATUS_READ_MASK: u32 = 0x07FF;
 const DPC_COUNTER_MASK: u32 = 0x00FF_FFFF;
 
 /// `Sync Full`. Top two bits of the command byte are ignored (`0xE9` → `0x29`).
+const CMD_SYNC_LOAD: u8 = 0x26;
+const CMD_SYNC_PIPE: u8 = 0x27;
+const CMD_SYNC_TILE: u8 = 0x28;
 const CMD_SYNC_FULL: u8 = 0x29;
+
+const CMD_SET_SCISSOR: u8 = 0x2D;
+const CMD_SET_PRIM_DEPTH: u8 = 0x2E;
+const CMD_SET_OTHER_MODES: u8 = 0x2F;
+const CMD_SET_FILL_COLOR: u8 = 0x37;
+const CMD_SET_FOG_COLOR: u8 = 0x38;
+const CMD_SET_BLEND_COLOR: u8 = 0x39;
+const CMD_SET_PRIM_COLOR: u8 = 0x3A;
+const CMD_SET_ENV_COLOR: u8 = 0x3B;
+const CMD_SET_TEXTURE_IMAGE: u8 = 0x3D;
+const CMD_SET_DEPTH_IMAGE: u8 = 0x3E;
+const CMD_SET_COLOR_IMAGE: u8 = 0x3F;
+
+/// Bits [55:0] of a command word (opcode stripped).
+const CMD_PAYLOAD_MASK: u64 = 0x00FF_FFFF_FFFF_FFFF;
 
 /// Load TLUT / Set Tile Size / Load Block / Load Tile / Set Tile.
 const CMD_LOAD_TLUT: u8 = 0x30;
@@ -278,6 +300,142 @@ fn write_buftest_data(rdp: &mut CpuRdpLle, value: u32) {
     rdp.dps_span[index as usize] = value & mask;
 }
 
+/// 64-bit words this command occupies, including the opcode word.
+///
+/// Triangles are 4 words plus 8 (shade), 8 (texture), and 2 (depth) as selected
+/// by opcode bits [58:56]. Texture rectangles are the opcode word plus the
+/// S/T derivative word. Every other opcode is a single word.
+pub fn command_word_count(word: u64) -> usize {
+    let cmd_id = command_id(word);
+    match cmd_id {
+        0x08..=0x0F => {
+            let mut n = 4;
+            if cmd_id & 0b100 != 0 {
+                n += 8;
+            }
+            if cmd_id & 0b010 != 0 {
+                n += 8;
+            }
+            if cmd_id & 0b001 != 0 {
+                n += 2;
+            }
+            n
+        }
+        CMD_TEX_RECT | CMD_TEX_RECT_FLIP => 2,
+        _ => 1,
+    }
+}
+
+fn command_id(word: u64) -> u8 {
+    ((word >> 56) & 0x3F) as u8
+}
+
+fn image_from_word(word: u64) -> RdpImageState {
+    RdpImageState {
+        format: ((word >> 53) & 0x7) as u8,
+        size: ((word >> 51) & 0x3) as u8,
+        width: ((word >> 32) & 0x3FF) as u16,
+        addr: (word & 0x00FF_FFFF) as u32,
+    }
+}
+
+fn scissor_from_word(word: u64) -> RdpScissor {
+    RdpScissor {
+        ulx: ((word >> 44) & 0xFFF) as u16,
+        uly: ((word >> 32) & 0xFFF) as u16,
+        field: (word & (1 << 25)) != 0,
+        odd: (word & (1 << 24)) != 0,
+        lrx: ((word >> 12) & 0xFFF) as u16,
+        lry: (word & 0xFFF) as u16,
+    }
+}
+
+fn is_nop(cmd_id: u8) -> bool {
+    matches!(cmd_id, 0x00..=0x07 | 0x10..=0x23 | 0x31)
+}
+
+fn apply_command(rdp: &mut CpuRdpLle, words: &[u64], rdram: &mut Rdram) -> Result<RdpAction, Trap> {
+    let word = words[0];
+    let cmd_id = command_id(word);
+    match cmd_id {
+        id if is_nop(id) => Ok(RdpAction::None),
+        CMD_SYNC_LOAD => {
+            sync_barrier(rdp, RdpSyncKind::Load, rdram)?;
+            Ok(RdpAction::None)
+        }
+        CMD_SYNC_PIPE => {
+            sync_barrier(rdp, RdpSyncKind::Pipe, rdram)?;
+            Ok(RdpAction::None)
+        }
+        CMD_SYNC_TILE => {
+            sync_barrier(rdp, RdpSyncKind::Tile, rdram)?;
+            Ok(RdpAction::None)
+        }
+        CMD_SYNC_FULL => combine_blend::sync_full(rdp, rdram),
+        CMD_SET_SCISSOR => {
+            rdp.scissor = scissor_from_word(word);
+            Ok(RdpAction::None)
+        }
+        CMD_SET_PRIM_DEPTH => {
+            raster::set_primitive_depth(rdp, word)?;
+            Ok(RdpAction::None)
+        }
+        CMD_SET_OTHER_MODES => {
+            rdp.other_modes = word & CMD_PAYLOAD_MASK;
+            Ok(RdpAction::None)
+        }
+        CMD_SET_FILL_COLOR => {
+            rdp.fill_color = word as u32;
+            Ok(RdpAction::None)
+        }
+        CMD_SET_FOG_COLOR => {
+            rdp.fog_color = word as u32;
+            Ok(RdpAction::None)
+        }
+        CMD_SET_BLEND_COLOR => {
+            rdp.blend_color = word as u32;
+            Ok(RdpAction::None)
+        }
+        CMD_SET_PRIM_COLOR => {
+            rdp.prim_min_level = ((word >> 40) & 0xFF) as u8;
+            rdp.prim_lod_frac = ((word >> 32) & 0xFF) as u8;
+            rdp.prim_color = word as u32;
+            Ok(RdpAction::None)
+        }
+        CMD_SET_ENV_COLOR => {
+            rdp.env_color = word as u32;
+            Ok(RdpAction::None)
+        }
+        CMD_SET_COMBINE => {
+            // Mux selects only. Cycle math stays in the combiner (W4).
+            rdp.combine_mode = word & CMD_PAYLOAD_MASK;
+            Ok(RdpAction::None)
+        }
+        CMD_SET_TEXTURE_IMAGE => {
+            rdp.texture_image = image_from_word(word);
+            Ok(RdpAction::None)
+        }
+        CMD_SET_DEPTH_IMAGE => {
+            rdp.depth_image_addr = (word & 0x00FF_FFFF) as u32;
+            Ok(RdpAction::None)
+        }
+        CMD_SET_COLOR_IMAGE => {
+            rdp.color_image = image_from_word(word);
+            Ok(RdpAction::None)
+        }
+        CMD_LOAD_TLUT | CMD_SET_TILE_SIZE | CMD_LOAD_BLOCK | CMD_LOAD_TILE | CMD_SET_TILE => {
+            tmem::exec_tmem_command(rdp, word, rdram).map(|_| RdpAction::None)
+        }
+        0x08..=0x0F | CMD_TEX_RECT | CMD_TEX_RECT_FLIP | CMD_FILL_RECT => {
+            // `words` is the full command (`command_word_count`), including
+            // shade / texture / depth or the texture-rectangle derivative.
+            raster::draw_primitive(rdp, words, rdram)?;
+            Ok(RdpAction::None)
+        }
+        _ => Err(Trap::UnimplementedRdpCommand { cmd_id, word }),
+    }
+}
+
 pub fn submit_commands(
     rdp: &mut CpuRdpLle,
     cmds: &[u64],
@@ -287,25 +445,19 @@ pub fn submit_commands(
         return Ok(RdpAction::None);
     }
     let mut action = RdpAction::None;
-    for &word in cmds {
-        let cmd_id = ((word >> 56) & 0x3F) as u8;
-        match cmd_id {
-            CMD_SYNC_FULL => {
-                action = combine_blend::sync_full(rdp, rdram)?;
-            }
-            CMD_LOAD_TLUT | CMD_SET_TILE_SIZE | CMD_LOAD_BLOCK | CMD_LOAD_TILE | CMD_SET_TILE => {
-                tmem::unimplemented_tmem_op(cmd_id, word)?;
-            }
-            0x08..=0x0F | CMD_TEX_RECT | CMD_TEX_RECT_FLIP | CMD_FILL_RECT => {
-                raster::unimplemented_primitive(cmd_id, word)?;
-            }
-            CMD_SET_COMBINE => {
-                combine_blend::unimplemented_combine(cmd_id, word)?;
-            }
-            _ => {
-                return Err(Trap::UnimplementedRdpCommand { cmd_id, word });
-            }
+    let mut index = 0;
+    while index < cmds.len() {
+        let word = cmds[index];
+        let cmd_id = command_id(word);
+        let len = command_word_count(word);
+        if index + len > cmds.len() {
+            return Err(Trap::UnimplementedRdpCommand { cmd_id, word });
         }
+        let step = apply_command(rdp, &cmds[index..index + len], rdram)?;
+        if step == RdpAction::RaiseDpIntr {
+            action = RdpAction::RaiseDpIntr;
+        }
+        index += len;
     }
     // The list was fetched, so the walking DMA has the bytes.
     complete_cmd_dma(rdp);

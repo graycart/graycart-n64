@@ -1,9 +1,11 @@
-//! NEC VR4300, VR4305, VR4310 User's Manual U10504EJ7V0UMJ1 and docs/01-cpu-r4300i.md.
-//! Unit tests for Video Interface (VI).
+//! Unit tests for the Video Interface.
+//!
+//! Cited: N64brew — Video Interface (`VI_CTRL` TYPE, `VI_V_VIDEO`, `VI_Y_SCALE`)
+//!   https://n64brew.dev/wiki/Video_Interface
 
 use crate::bus::Rdram;
 use crate::trap::Trap;
-use crate::vi::{Vi, ViAction};
+use crate::vi::{hash_rgba8888_frame, Vi, ViAction, ViColorType};
 
 #[test]
 fn test_vi_registers_rw_and_masking() {
@@ -119,4 +121,148 @@ fn test_vi_framebuffer_hash() {
     let rdram = Rdram::new(false);
     let h = vi.framebuffer_hash(&rdram);
     assert_ne!(h, 0);
+}
+
+fn rgba5551(r: u16, g: u16, b: u16, a: u16) -> u16 {
+    ((r & 31) << 11) | ((g & 31) << 6) | ((b & 31) << 1) | (a & 1)
+}
+
+/// One active output line, `Y_SCALE = 0x400` (1:1), REPLICATE anti-alias mode.
+fn program_1x1(vi: &mut Vi, ctrl: u32, width: u32) {
+    vi.write_reg(0x00, ctrl).unwrap();
+    vi.write_reg(0x04, 0).unwrap();
+    vi.write_reg(0x08, width).unwrap();
+    // V_START = 0, V_END = 2 → (2 - 0) / 2 = 1 output line.
+    vi.write_reg(0x28, 2).unwrap();
+    vi.write_reg(0x34, 0x400).unwrap();
+}
+
+#[test]
+fn vi_ctrl_type_selects_off_rgba16_or_rgba32() {
+    let mut vi = Vi::new();
+    assert_eq!(vi.color_type().unwrap(), ViColorType::Off);
+    vi.write_reg(0x00, 2).unwrap();
+    assert_eq!(vi.color_type().unwrap(), ViColorType::Rgba16);
+    vi.write_reg(0x00, 3).unwrap();
+    assert_eq!(vi.color_type().unwrap(), ViColorType::Rgba32);
+    assert!(matches!(
+        vi.write_reg(0x00, 1).and_then(|_| vi.color_type()),
+        Err(Trap::UnimplementedRegister {
+            device: "VI_CTRL.TYPE",
+            offset: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn scanout_rgba16_golden_frame() {
+    let mut vi = Vi::new();
+    // TYPE = 16-bit, AA_MODE = REPLICATE.
+    program_1x1(&mut vi, (3 << 8) | 2, 4);
+    let mut rdram = Rdram::new(false);
+    let pixels = [
+        rgba5551(31, 0, 0, 1),
+        rgba5551(0, 31, 0, 1),
+        rgba5551(0, 0, 31, 0),
+        rgba5551(16, 8, 4, 1),
+    ];
+    for (i, pix) in pixels.iter().enumerate() {
+        rdram.write_u16((i * 2) as u32, *pix).unwrap();
+    }
+    let frame = vi.scanout_rgba8888(&rdram).unwrap();
+    assert_eq!(frame.width, 4);
+    assert_eq!(frame.height, 1);
+    assert_eq!(frame.color_type, ViColorType::Rgba16);
+    assert_eq!(
+        frame.rgba,
+        [
+            0xFF, 0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x00, 0x84, 0x42,
+            0x21, 0xFF,
+        ]
+    );
+    let hash = hash_rgba8888_frame(&frame);
+    assert_eq!(hash, 0xaf4e_a6cd_8e31_5cf0);
+    assert_eq!(vi.scanout_frame_hash(&rdram).unwrap(), hash);
+    assert_ne!(vi.framebuffer_hash(&rdram), hash);
+}
+
+#[test]
+fn scanout_rgba32_golden_frame() {
+    let mut vi = Vi::new();
+    program_1x1(&mut vi, (3 << 8) | 3, 2);
+    let mut rdram = Rdram::new(false);
+    rdram.write_u32(0, 0x1122_3344).unwrap();
+    rdram.write_u32(4, 0x0000_00FF).unwrap();
+    let frame = vi.scanout_rgba8888(&rdram).unwrap();
+    assert_eq!(frame.color_type, ViColorType::Rgba32);
+    assert_eq!(frame.rgba, [0x11, 0x22, 0x33, 0x44, 0x00, 0x00, 0x00, 0xFF]);
+    assert_eq!(hash_rgba8888_frame(&frame), 0xddd3_277d_0c1d_9727);
+    assert_eq!(
+        vi.scanout_frame_hash(&rdram).unwrap(),
+        0xddd3_277d_0c1d_9727
+    );
+}
+
+#[test]
+fn scanout_off_is_empty_and_filters_or_reserved_type_trap() {
+    let vi = Vi::new();
+    let rdram = Rdram::new(false);
+    let frame = vi.scanout_rgba8888(&rdram).unwrap();
+    assert_eq!(frame.width, 0);
+    assert_eq!(frame.height, 0);
+    assert!(frame.rgba.is_empty());
+    assert_eq!(hash_rgba8888_frame(&frame), 0x1c09_b3ee_f006_1e32);
+
+    let mut vi = Vi::new();
+    program_1x1(&mut vi, (3 << 8) | 1, 4);
+    assert!(vi.scanout_rgba8888(&rdram).is_err());
+
+    program_1x1(&mut vi, ((3 << 8) | 2) | (1 << 3), 4); // gamma
+    assert!(matches!(
+        vi.scanout_rgba8888(&rdram),
+        Err(Trap::UnimplementedRegister {
+            device: "VI_SCANOUT",
+            ..
+        })
+    ));
+    program_1x1(&mut vi, 2, 4); // AA_MODE = 0, not REPLICATE
+    assert!(vi.scanout_rgba8888(&rdram).is_err());
+    program_1x1(&mut vi, ((3 << 8) | 2) | (1 << 16), 4); // dedither
+    assert!(vi.scanout_rgba8888(&rdram).is_err());
+}
+
+#[test]
+fn scanout_requires_aligned_origin_and_stride() {
+    let mut vi = Vi::new();
+    let rdram = Rdram::new(false);
+    program_1x1(&mut vi, (3 << 8) | 2, 4);
+    vi.write_reg(0x04, 4).unwrap();
+    assert!(matches!(
+        vi.scanout_rgba8888(&rdram),
+        Err(Trap::MisalignedAccess { pa: 4, size: 8 })
+    ));
+    vi.write_reg(0x04, 0).unwrap();
+    vi.write_reg(0x08, 2).unwrap(); // 16-bit stride of 4 is not a multiple of 8
+    assert!(matches!(
+        vi.scanout_rgba8888(&rdram),
+        Err(Trap::MisalignedAccess { .. })
+    ));
+}
+
+#[test]
+fn scanout_height_follows_half_lines_and_y_scale() {
+    let mut vi = Vi::new();
+    // V_START = 2, V_END = 6 → 2 output lines. Y_SCALE = 0x800 steps two rows.
+    // Last row index is 2, so the source span is 3 rows.
+    vi.write_reg(0x00, (3 << 8) | 2).unwrap();
+    vi.write_reg(0x08, 4).unwrap();
+    vi.write_reg(0x28, (2 << 16) | 6).unwrap();
+    vi.write_reg(0x34, 0x800).unwrap();
+    assert_eq!(vi.active_output_lines(), 2);
+    assert_eq!(vi.scanout_height(), 3);
+    let rdram = Rdram::new(false);
+    let frame = vi.scanout_rgba8888(&rdram).unwrap();
+    assert_eq!(frame.height, 3);
+    assert_eq!(frame.rgba.len(), 3 * 4 * 4);
 }

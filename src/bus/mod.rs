@@ -2,6 +2,8 @@
 //!
 //! Cited: N64brew — Memory map & SysAD access quirks
 //!   https://n64brew.dev/wiki/Memory_map · docs/02-bus-memory-dma.md
+//! Cited: N64brew — Reality Display Processor/Interface (DPC command DMA)
+//!   https://n64brew.dev/wiki/Reality_Display_Processor/Interface
 //! Cross-check: Graycart N64 Development Plan §3.5 (9th-bit RDRAM) & §5.1 (Trap, don't stub)
 
 pub mod isviewer;
@@ -622,10 +624,9 @@ impl Bus {
                 Ok(())
             }
             PhysRegion::RdpCmdRegs => {
-                match self.rdp.write_cmd_reg_action(pa & 0xFFFF, val)? {
-                    RdpAction::RaiseDpIntr => self.mi.set_intr(MI_INTR_DP),
-                    RdpAction::None => {}
-                }
+                let action = self.rdp.write_cmd_reg_action(pa & 0xFFFF, val)?;
+                self.apply_rdp_action(action);
+                self.pump_dpc_fifo()?;
                 Ok(())
             }
             PhysRegion::RdpSpanRegs => {
@@ -678,6 +679,68 @@ impl Bus {
         }
     }
 
+    fn apply_rdp_action(&mut self, action: RdpAction) {
+        if let RdpAction::RaiseDpIntr = action {
+            self.mi.set_intr(MI_INTR_DP);
+        }
+    }
+
+    /// Copy 64-bit big-endian command words from `CURRENT` toward `active_end`
+    /// and run them. XBUS selects `sp_dmem` (low 12 bits); otherwise RDRAM.
+    ///
+    /// FREEZE and FLUSH hold the fetch. A second buffered START/END pair is
+    /// pulled in after the first list retires (`complete_cmd_dma`).
+    fn pump_dpc_fifo(&mut self) -> Result<(), Trap> {
+        for _ in 0..8 {
+            if !dpc_fetch_pending(&self.rdp) {
+                return Ok(());
+            }
+            let words = self.collect_dpc_words()?;
+            if words.is_empty() {
+                return Ok(());
+            }
+            let action = {
+                let rdp = &mut self.rdp;
+                let rdram = &mut self.rdram;
+                rdp.submit_commands(&words, rdram)?
+            };
+            self.apply_rdp_action(action);
+        }
+        Ok(())
+    }
+
+    fn collect_dpc_words(&self) -> Result<Vec<u64>, Trap> {
+        let mut addr = self.rdp.dpc_current;
+        let end = self.rdp.dpc_active_end;
+        let mut words = Vec::new();
+        while addr < end {
+            let next = addr.saturating_add(8);
+            if next > end {
+                break;
+            }
+            words.push(self.read_dpc_word(addr)?);
+            addr = next;
+        }
+        Ok(words)
+    }
+
+    fn read_dpc_word(&self, addr: u32) -> Result<u64, Trap> {
+        if self.rdp.dpc_status & CpuRdpLle::STATUS_XBUS_DMEM_DMA != 0 {
+            let off = (addr as usize) & 0x0FFF;
+            if off + 8 > self.sp_dmem.len() {
+                return Err(Trap::UnmappedFreeze {
+                    pa: addr,
+                    size: 8,
+                    is_write: false,
+                });
+            }
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&self.sp_dmem[off..off + 8]);
+            return Ok(u64::from_be_bytes(buf));
+        }
+        self.rdram.read_u64(addr)
+    }
+
     fn unimplemented_region_trap(&self, region: PhysRegion, pa: u32, is_write: bool) -> Trap {
         let device = match region {
             PhysRegion::RdramRegs => "RDRAM_REGS",
@@ -703,4 +766,9 @@ impl Bus {
             is_write,
         }
     }
+}
+
+fn dpc_fetch_pending(rdp: &CpuRdpLle) -> bool {
+    let blocked = CpuRdpLle::STATUS_FREEZE | CpuRdpLle::STATUS_FLUSH;
+    (rdp.dpc_status & blocked) == 0 && rdp.dpc_current < rdp.dpc_active_end
 }

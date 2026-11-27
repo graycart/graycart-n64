@@ -46,6 +46,41 @@ pub enum RdpAction {
     RaiseDpIntr,
 }
 
+/// Latched color or texture image (`Set Color Image` / `Set Texture Image`).
+///
+/// Field widths follow n64brew: format [55:53], size [52:51], width [41:32]
+/// (pixels minus one), DRAM address [23:0].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RdpImageState {
+    pub format: u8,
+    pub size: u8,
+    pub width: u16,
+    pub addr: u32,
+}
+
+/// Latched `Set Scissor` rectangle (u10.2 coordinates) plus interlace bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RdpScissor {
+    pub ulx: u16,
+    pub uly: u16,
+    pub lrx: u16,
+    pub lry: u16,
+    pub field: bool,
+    pub odd: bool,
+}
+
+/// Last edge-walker span. Updated as a triangle or rectangle is stepped.
+///
+/// `x_major` / `x_minor` are s11.16, matching the triangle edge fields.
+/// `valid` is false until the first span of a primitive is produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RdpSpanTemps {
+    pub y: i32,
+    pub x_major: i64,
+    pub x_minor: i64,
+    pub valid: bool,
+}
+
 /// Low-level RDP command execution contract shared by [`CpuRdpLle`] and `EdgeWalker`.
 pub trait RdpBackend {
     /// Submit one or more 64-bit RDP command words targeting `rdram` (+ 9th-bit side array).
@@ -98,6 +133,54 @@ pub struct CpuRdpLle {
     /// real buffer is 288 bytes. Word index `n & 3 == 2` keeps only the low byte,
     /// and `n & 3 == 3` is hardwired 0 (n64brew `DPS_BUFTEST_DATA` map).
     pub dps_span: Vec<u32>,
+
+    /// `Set Color Image` (0x3F).
+    pub color_image: RdpImageState,
+    /// `Set Depth Image` (0x3E) DRAM address, bits 23:0.
+    pub depth_image_addr: u32,
+    /// `Set Texture Image` (0x3D).
+    pub texture_image: RdpImageState,
+    /// `Set Scissor` (0x2D).
+    pub scissor: RdpScissor,
+    /// `Set Other Modes` (0x2F), bits 55:0 (command id stripped).
+    ///
+    /// Cycle type and blender muxes are evaluated by [`combine_blend::eval_blend`].
+    pub other_modes: u64,
+    /// `Set Fill Color` (0x37), bits 31:0.
+    pub fill_color: u32,
+    /// `Set Fog Color` (0x38), RGBA8888 in bits 31:0.
+    pub fog_color: u32,
+    /// `Set Blend Color` (0x39), RGBA8888 in bits 31:0.
+    pub blend_color: u32,
+    /// `Set Primitive Color` (0x3A) RGBA8888.
+    pub prim_color: u32,
+    /// `Set Primitive Color` minimum LOD, bits 47:40.
+    pub prim_min_level: u8,
+    /// `Set Primitive Color` LOD fraction, bits 39:32.
+    pub prim_lod_frac: u8,
+    /// `Set Environment Color` (0x3B), RGBA8888.
+    pub env_color: u32,
+    /// `Set Combine Mode` (0x3C) mux selects, bits 55:0.
+    ///
+    /// Evaluated by [`combine_blend::eval_combine`]: `(A - B) * C + D`.
+    pub combine_mode: u64,
+    /// `Set Convert` K4, bits 17:9. Combiner RGB B input 7.
+    pub convert_k4: u16,
+    /// `Set Convert` K5, bits 8:0. Combiner RGB C input 15.
+    pub convert_k5: u16,
+    /// Chroma-key center, RGB. Combiner RGB B input 6 (`Set Key R` / `Set Key GB`).
+    pub key_center: [u8; 3],
+    /// Chroma-key scale, RGB. Combiner RGB C input 6 (`Set Key R` / `Set Key GB`).
+    pub key_scale: [u8; 3],
+    /// Eight tile descriptors (`Set Tile`, `Set Tile Size`, and the TMEM loads).
+    pub tiles: [tmem::TileDesc; tmem::TILE_COUNT],
+    /// `Set Primitive Depth` (0x2E) integer Z. Raster latches this; the command
+    /// walker does not route `0x2E` yet (`raster::set_primitive_depth`).
+    pub prim_z: u16,
+    /// `Set Primitive Depth` deltaz. Hardware wants a power of two.
+    pub prim_dz: u16,
+    /// Edge-walker span temps (last scanline of the primitive just drawn).
+    pub span: RdpSpanTemps,
 }
 
 impl CpuRdpLle {
@@ -132,6 +215,27 @@ impl CpuRdpLle {
             dps_test_mode: 0,
             dps_buftest_addr: 0,
             dps_span: vec![0; 128],
+            color_image: RdpImageState::default(),
+            depth_image_addr: 0,
+            texture_image: RdpImageState::default(),
+            scissor: RdpScissor::default(),
+            other_modes: 0,
+            fill_color: 0,
+            fog_color: 0,
+            blend_color: 0,
+            prim_color: 0,
+            prim_min_level: 0,
+            prim_lod_frac: 0,
+            env_color: 0,
+            combine_mode: 0,
+            convert_k4: 0,
+            convert_k5: 0,
+            key_center: [0, 0, 0],
+            key_scale: [0, 0, 0],
+            tiles: [tmem::TileDesc::default(); tmem::TILE_COUNT],
+            prim_z: 0,
+            prim_dz: 0,
+            span: RdpSpanTemps::default(),
         }
     }
 
@@ -139,8 +243,9 @@ impl CpuRdpLle {
     /// transfer that was left pending (`START_VALID` + `END_VALID`).
     ///
     /// [`RdpBackend::submit`] does this after a command list is accepted.
-    /// Register writes do not fetch RDRAM/DMEM; the bus copies
-    /// `[dpc_current, dpc_active_end)` and then calls this or [`Self::submit_commands`].
+    /// [`crate::bus::Bus`] copies `[dpc_current, dpc_active_end)` from RDRAM,
+    /// or from `sp_dmem` when XBUS is set, on `DPC_END` / incremental END /
+    /// freeze or flush release, then calls [`Self::submit_commands`].
     pub fn complete_cmd_dma(&mut self) {
         regs::complete_cmd_dma(self);
     }
