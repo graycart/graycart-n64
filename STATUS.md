@@ -6,9 +6,32 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 ## Active Milestone
 
 - **Current:** `M4 — RSP vector unit` receipts complete on `feat/m1-cpu` (ready for Dave's review & M5 Bespoke Software LLE RDP `CpuRdpLle` + VI kickoff)
+- **Branch / HEAD:** `feat/m1-cpu` (local feature branch, 5 commits ahead of `origin/main` `28a507a`, not yet pushed/PR'd)
 - **Bespoke Vulkan Compute LLE RDP Name:** **`EdgeWalker`** (zero third-party RDP forks/FFI)
 - **Debugger & UI Standard:** [`docs/13-debugger-and-ui-architecture.md`](./docs/13-debugger-and-ui-architecture.md) (Departure Mono + `btop`-inspired Machine Monitor with live CPU/Memory/GPU/Audio graphs matching `graycart-gb` & `graycart-gba`)
 - **Pre-code gate:** Accepted by Dave on 2026-11-27
+
+## Session Handoff Snapshot (For Fresh Agent Sessions)
+
+- **Workspace & OS:** Windows (PowerShell 5.1; use `; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }` instead of `&&`). `graycart-n64` is a git submodule under the parent `graycart` repo (`.git` points to `../.git/modules/graycart-n64`). Always set `$env:RUST_MIN_STACK = "16777216"` for `cargo test`.
+- **Governance & Execution Model:** Follow [`AGENTS.md`](./AGENTS.md) strictly. The top-level agent acts strictly as **Orchestrator ("the boss")**: design thin interface seams, fan out implementation across **maximally parallel `flash_lite` subagents** on strictly disjoint files, audit every worker diff line-by-line against hardware specs before merging, run all verification gates, update `STATUS.md`, and report a **Progress Board + runnable PowerShell commands** after every milestone.
+- **Commits on `feat/m1-cpu` (since `main` `28a507a`):**
+  1. `e47f185` — M1.0 seam + Wave A VR4300 integer ISA (5 parallel `flash_lite` workers)
+  2. `c7ba46b` — M1.B0 seam + Wave B COP0/Exceptions, 32-entry TLB, COP1 FPU, L1 Caches (4 parallel `flash_lite` workers)
+  3. `c7ffeaa` — M2 MI/RI/PI/SI/PIF-HLE/VI/AI peripherals, DMA/IRQ scheduler, VR4300 `SRA`/`SRAV` 64-bit hardware quirk fix, **26/26 Dillonb PASS** (4 parallel `flash_lite` workers)
+  4. `c3b5b15` — M3 RSP Scalar Unit, SP MMIO + 2D skip/count DMA, exact `2/3` RCP scheduling, and upgraded [`AGENTS.md`](./AGENTS.md) parallel playbook (3 parallel `flash_lite` workers)
+  5. `724663c` — M4 RSP Vector Unit (`LWC2`/`SWC2` + 8×8 transpose, 22 arith/MAC ops w/ 48-bit acc, 17 compare/clip/logic ops, `MFC2`/`MTC2`/`CFC2`/`CTC2`, zero-float integer 512-entry `RCP`/`RSQ` ROMs; 4 parallel `flash_lite` workers)
+- **Already-Fetched Local Fixtures (gitignored, never commit):**
+  - `tests/fixtures/fetched/dillonb/` (26 standard `.z64` ROMs)
+  - `tests/fixtures/fetched/dillonb-simpleboot/` (26 `*_simpleboot.z64` ROMs — **26/26 PASS in ~5s `--release`**)
+  - `tests/fixtures/fetched/n64memtest/n64memtest.z64` (v0.9)
+  - Local commercial smoke ROMs live outside the submodule in `..\carts\n64` (**8 `.z64` carts**, local-only, NEVER commit; `probe_local_carts` runs 2M cycles in ~0.4s `--release` with 7/8 running cleanly and Mario Kart 64 hitting clean `N64DD_REGS 0x0508` presence-probe trap).
+- **Next Milestone Ready to Kick Off (`M5 — Bespoke Software LLE RDP CpuRdpLle + VI Scanout`):**
+  - Orchestrator M5.0 seam: move `CpuRdpLle` onto `Bus` (`pub rdp: CpuRdpLle`) as single source of truth for `0x0410_0000..=0x042F_FFFF` (DPC/DPS regs + XBUS DMEM / RDRAM ring-buffer DMA + `MI_INTR_DP` on `SyncFull`), then dispatch **4 parallel `flash_lite` workers** on disjoint files:
+    1. `src/rdp/regs.rs` + `regs_tests.rs` — DPC/DPS MMIO regs, 10-bit paired `DPC_STATUS`, command FIFO decoder & dispatch.
+    2. `src/rdp/tmem.rs` + `tmem_tests.rs` — 4 KiB TMEM + `SetTile`/`SetTileSize`/`LoadTile`/`LoadBlock`/`LoadTlut` + texel sampler.
+    3. `src/rdp/raster.rs` + `raster_tests.rs` — Edge-walker triangle rasterizer, `FillRectangle`, `TextureRectangle`/`Flip`, scissor clip, color/Z-buffer + 9th-bit coverage R/W.
+    4. `src/rdp/combine_blend.rs` + `combine_blend_tests.rs` + VI RGBA8888 scanout — 1-cycle/2-cycle Color Combiner, Blender, `SyncFull` → `MI_INTR_DP`, and VI RGBA16/RGBA32 framebuffer scanout for golden hash/PNG verification (the software oracle for M6 bespoke Vulkan compute **`EdgeWalker`**).
 
 ## Milestone Ledger (M0–M12)
 
