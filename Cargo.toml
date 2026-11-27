@@ -23,6 +23,11 @@ default = []
 # Explicit, opt-in HLE paths (never enabled by default; always labeled).
 rsp-hle = []
 rdp-hle = []
+# Compiles EdgeWalker's compute-device seam (M6). Empty in W0 on purpose:
+# wgpu (pure Rust, no C++ FFI) is the compute API, not ash. W1 sets
+# `vulkan-rdp = ["dep:wgpu"]` when the first shader lands. Until then this
+# feature pulls no GPU crate, and default features stay GPU-free.
+vulkan-rdp = []
 
 [dependencies]
 # Whole-machine state is serializable from M0 for deterministic savestates/rewind/replay.

@@ -1,11 +1,14 @@
-//! Reality Display Processor (RDP) backend trait and bespoke LLE shells.
+//! Reality Display Processor (RDP) backend trait and bespoke LLE implementations.
 //!
 //! Two 100%-bespoke Graycart LLE RDP implementations share [`RdpBackend`]:
-//! - [`CpuRdpLle`] (M5): pure-Rust software LLE reference hash oracle (default in CI).
-//! - **`EdgeWalker`** (M6, behind a future opt-in Vulkan compute backend): our bespoke
-//!   Vulkan compute LLE RDP written from scratch and cross-checked bit-for-bit against
-//!   [`CpuRdpLle`] and external hardware-verified goldens, with opt-in M11 enhancements
-//!   (upscaling, SSAA, widescreen, VI/CRT filters, Oracle Lens, Live Frame Inspector).
+//! - [`CpuRdpLle`] (M5): pure-Rust software LLE reference (default in CI).
+//! - [`EdgeWalker`] (M6): Graycart's bespoke Vulkan compute LLE RDP.
+//!   **M6 gate:** bit-exact frame hash EdgeWalker == CpuRdpLle.
+//!   The opt-in `vulkan-rdp` feature compiles the compute-device seam. Until
+//!   shaders land, [`EdgeWalker`] `submit` / `sync` stay on the deterministic
+//!   CPU path so default CI remains GPU-free and bit-exact. M11 enhancements
+//!   (upscaling, SSAA, widescreen, VI/CRT filters, Oracle Lens, Live Frame
+//!   Inspector) stay behind `EnhancementConfig`.
 //!
 //! Cited: N64brew — Reality Display Processor / Interface
 //!   https://n64brew.dev/wiki/Reality_Display_Processor
@@ -13,9 +16,14 @@
 //!   docs/04-rdp.md
 
 pub mod combine_blend;
+pub mod edgewalker;
 pub mod raster;
 pub mod regs;
 pub mod tmem;
+
+#[cfg(feature = "vulkan-rdp")]
+pub use edgewalker::ComputeDevice;
+pub use edgewalker::EdgeWalker;
 
 use serde::{Deserialize, Serialize};
 

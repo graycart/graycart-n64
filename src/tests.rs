@@ -454,3 +454,31 @@ fn m5_0_bus_rdp_persistent_mmio_and_syncfull_mi_intr_dp() {
         .unwrap();
     assert!(core.bus.mi.irq_pending());
 }
+
+/// EdgeWalker (Vulkan compute LLE) matches CpuRdpLle on the M5 FillRectangle smoke list.
+///
+/// The VI scanout frame hash and the raw framebuffer FNV (color bytes plus the
+/// 9th-bit window) are bit-exact, and the filled frame is not a blank scanout.
+#[test]
+fn m6_edgewalker_matches_cpu_rdp_lle_fill_rectangle() {
+    use crate::rdp::edgewalker::parity::{
+        assert_edgewalker_matches_cpu_rdp_lle, fill_rectangle_smoke_cmds, rgba16_replicate_scanout,
+    };
+
+    let vi = rgba16_replicate_scanout(16);
+    let filled = assert_edgewalker_matches_cpu_rdp_lle(
+        "fill-rectangle",
+        &fill_rectangle_smoke_cmds(),
+        &[],
+        &vi,
+    );
+    let blank = assert_edgewalker_matches_cpu_rdp_lle("empty-submit", &[], &[], &vi);
+    assert_ne!(
+        filled.scanout_hash, blank.scanout_hash,
+        "FillRectangle must change the VI scanout hash"
+    );
+    assert_ne!(
+        filled.raw_fb_fnv, blank.raw_fb_fnv,
+        "FillRectangle must change the raw framebuffer FNV"
+    );
+}
