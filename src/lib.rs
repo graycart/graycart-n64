@@ -117,7 +117,6 @@ pub struct N64Core {
     pub scheduler: Scheduler,
     pub cpu: InterpCpu,
     pub rsp: InterpRsp,
-    pub rdp: CpuRdpLle,
     pub bus: Bus,
 }
 
@@ -133,7 +132,6 @@ impl N64Core {
             scheduler,
             cpu: InterpCpu::new(),
             rsp: InterpRsp::new(),
-            rdp: CpuRdpLle::new(),
             bus,
         }
     }
@@ -149,19 +147,44 @@ impl N64Core {
     /// Attach a cartridge and apply the configured reset/boot state.
     pub fn load_cart(&mut self, cart: Cart) {
         let entry_pc = cart.header().entry_pc;
+        let cic = cart.cic();
         self.bus.attach_cart(cart);
-        self.reset_boot_state(entry_pc);
+        self.reset_boot_state(entry_pc, cic);
     }
 
     /// Reset machine state and seed the HLE soft-boot stub if configured.
-    fn reset_boot_state(&mut self, entry_pc: u32) {
+    fn reset_boot_state(&mut self, entry_pc: u32, cic: CicType) {
         self.scheduler.reset();
         self.scheduler.single_step_mode = self.config.single_step_mode;
         self.cpu.reset();
+        self.rsp.reset();
+        self.bus.sp.reset();
+        self.bus.rdp.reset();
+        self.bus.pif.seed_boot_ram(cic);
+        self.bus.pending_events.clear();
+        self.bus.pending_pi_len = 0;
+
+        // Start register-driven VI scanline schedule.
+        self.scheduler
+            .schedule_after(self.bus.vi.cycles_per_line(), EventKind::ViLine);
+
         if self.config.soft_boot {
-            // Soft-boot stub: copy up to 1 MiB from cart offset 0x1000 into RDRAM 0x0000_1000
-            // and seed the VR4300 PC to the header entry point (sign-extended 64-bit KSEG0/1).
-            self.bus.copy_cart_soft_boot();
+            // Soft-boot stub: copy up to 1 MiB from cart offset 0x1000 into RDRAM at
+            // (entry_pc & 0x1FFF_FFFF), seed standard OS low-memory boot variables
+            // (osTvType=NTSC, osRomBase, osMemSize), and jump to header entry_pc.
+            self.bus.copy_cart_soft_boot(entry_pc);
+            let _ = self.bus.rdram.write_u32(0x0000_0300, 1); // osTvType = NTSC
+            let _ = self.bus.rdram.write_u32(0x0000_0304, 0); // osRomType = Cartridge
+            let _ = self.bus.rdram.write_u32(0x0000_0308, 0xB000_0000); // osRomBase
+            let _ = self.bus.rdram.write_u32(0x0000_030C, 0); // osResetType = Cold
+            let _ = self
+                .bus
+                .rdram
+                .write_u32(0x0000_0310, u32::from(pif::Pif::cic_seed(cic)));
+            let _ = self
+                .bus
+                .rdram
+                .write_u32(0x0000_0318, self.bus.rdram.len() as u32); // osMemSize
             self.cpu.set_pc(entry_pc as i32 as i64 as u64);
         } else {
             // Cold reset vector in KSEG1 PIF ROM space (0xBFC0_0000).
@@ -174,10 +197,61 @@ impl N64Core {
         let target = self.scheduler.now_cpu_cycles().saturating_add(max_cycles);
         let start = self.scheduler.now_cpu_cycles();
         while self.scheduler.now_cpu_cycles() < target {
+            self.cpu.cop0.set_mi_interrupt(self.bus.mi.irq_pending());
             match self.cpu.step(&mut self.bus, &mut self.scheduler) {
                 Ok(elapsed) => {
                     let step = elapsed.max(1);
-                    self.scheduler.advance(step);
+                    for (delay, kind) in self.bus.drain_pending_events() {
+                        self.scheduler.schedule_after(delay, kind);
+                    }
+                    let rcp_cycles = self.scheduler.advance(step);
+                    if rcp_cycles > 0 && !self.bus.sp.is_halted() {
+                        if let Err(trap) = self.rsp.run(&mut self.bus, rcp_cycles) {
+                            return RunOutcome::Trapped {
+                                cycles: self.scheduler.now_cpu_cycles().saturating_sub(start),
+                                trap,
+                            };
+                        }
+                        for (delay, kind) in self.bus.drain_pending_events() {
+                            self.scheduler.schedule_after(delay, kind);
+                        }
+                    }
+                    while let Some(ev) = self.scheduler.pop_due() {
+                        match ev.kind {
+                            EventKind::CompareMatch => {
+                                self.cpu
+                                    .cop0
+                                    .count_clock
+                                    .on_compare_event(&mut self.scheduler);
+                                self.cpu.cop0.sync_timer_ip7();
+                            }
+                            EventKind::PiDmaComplete => {
+                                self.bus.complete_pi_dma();
+                            }
+                            EventKind::SiDmaComplete => {
+                                self.bus.complete_si_dma();
+                            }
+                            EventKind::ViLine => {
+                                let (vi_intr, _frame_done) = self.bus.vi.step_line();
+                                if vi_intr {
+                                    self.bus.mi.set_intr(mi::MI_INTR_VI);
+                                }
+                                let next_line = self.bus.vi.cycles_per_line();
+                                self.scheduler.schedule_after(next_line, EventKind::ViLine);
+                            }
+                            EventKind::AiDmaStep => {
+                                self.bus.mi.set_intr(mi::MI_INTR_AI);
+                                if let Some(next_delay) = self.bus.ai.on_dma_complete() {
+                                    self.scheduler
+                                        .schedule_after(next_delay, EventKind::AiDmaStep);
+                                }
+                            }
+                            EventKind::SpDmaComplete => {
+                                self.bus.complete_sp_dma();
+                            }
+                        }
+                    }
+                    self.cpu.cop0.set_mi_interrupt(self.bus.mi.irq_pending());
                 }
                 Err(trap) => {
                     return RunOutcome::Trapped {

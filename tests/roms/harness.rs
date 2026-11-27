@@ -1,6 +1,7 @@
-//! Shared ROM conformance harness and self-judging ISViewer log parser.
+//! Shared ROM conformance harness, Dillonb `r30` sentinel runner, and ISViewer log parser.
 //!
 //! Cited: docs/07-test-strategy.md §4 · docs/11-test-apparatus.md §4 · docs/12-test-gates.md
+//!   · docs/ORCHESTRATOR-HANDOFF.md §4 (M1.0 Dillonb r30 sentinel)
 //! Note: Keeps all ROM matrix rows behind `#[ignore]` so default CI stays 100% ROM-free.
 
 use std::path::Path;
@@ -88,6 +89,74 @@ pub fn parse_systemtest_log(log: &str) -> Option<SystemtestReport> {
         failed,
         failed_tests,
     })
+}
+
+/// Evaluate a Dillonb `n64-tests` sentinel value in `$r30` (`$fp`).
+///
+/// - `0`: still running
+/// - `u64::MAX` (`-1i64`) or `0x0000_0000_FFFF_FFFF`: PASS
+/// - any other non-zero value: FAIL test ID
+#[must_use]
+pub fn evaluate_dillonb_r30(r30: u64) -> Option<Outcome> {
+    if r30 == 0 {
+        None
+    } else if r30 == u64::MAX || r30 == 0x0000_0000_FFFF_FFFF {
+        Some(Outcome::Pass { total: 1 })
+    } else {
+        Some(Outcome::Fail {
+            total: 1,
+            failed: 1,
+            failed_names: vec![format!("dillonb_test_id={r30}")],
+        })
+    }
+}
+
+/// Run a Dillonb `n64-tests` ROM (`simpleboot` or standard soft-boot), polling `r30`
+/// in short slices so passing/failing tests finish immediately.
+pub fn run_dillonb_rom(path: &Path, opts: &BootOpts) -> (Outcome, u64, u64) {
+    let cart = match Cart::from_file(path) {
+        Ok(c) => c,
+        Err(e) => return (Outcome::BootFail(e.to_string()), 0, 0),
+    };
+
+    let mut cfg = N64Config::accurate();
+    cfg.soft_boot = opts.soft_boot;
+    cfg.expansion_pak = opts.expansion_pak;
+
+    let mut core = N64Core::with_cart(cart, cfg);
+    if let Some(entry) = opts.entry {
+        core.cpu.set_pc(entry as i32 as i64 as u64);
+    }
+
+    const SLICE: u64 = 10_000;
+    let mut executed_cycles = 0u64;
+    while executed_cycles < opts.max_cycles {
+        let budget = SLICE.min(opts.max_cycles - executed_cycles);
+        match core.run_cycles(budget) {
+            RunOutcome::Trapped { cycles, trap } => {
+                executed_cycles = executed_cycles.saturating_add(cycles);
+                return (
+                    Outcome::Unimplemented(trap),
+                    executed_cycles,
+                    core.cpu.instructions_executed(),
+                );
+            }
+            RunOutcome::Completed { cycles, .. } => {
+                executed_cycles = executed_cycles.saturating_add(cycles);
+                if let Some(outcome) = evaluate_dillonb_r30(core.cpu.gpr(30)) {
+                    return (outcome, executed_cycles, core.cpu.instructions_executed());
+                }
+            }
+        }
+    }
+
+    (
+        Outcome::Timeout {
+            cycles: executed_cycles,
+        },
+        executed_cycles,
+        core.cpu.instructions_executed(),
+    )
 }
 
 /// Run a ROM from disk under `opts` and return a structured [`Outcome`].

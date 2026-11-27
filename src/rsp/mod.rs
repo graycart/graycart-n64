@@ -1,13 +1,25 @@
-//! Reality Signal Processor (RSP) backend trait and LLE interpreter shell.
+//! Reality Signal Processor (RSP) backend trait and LLE interpreter.
 //!
 //! Cited: N64brew — Reality Signal Processor
 //!   https://n64brew.dev/wiki/Reality_Signal_Processor · docs/03-rsp.md
-//! Note: 4 KiB DMEM + 4 KiB IMEM allocated in M0; SU/DMA land in M3, VU in M4.
+//! Note: 4 KiB DMEM + 4 KiB IMEM + SP MMIO/DMA live on `Bus` as the single source of truth;
+//! SU executes in M3, VU (COP2) lands in M4.
+
+pub mod regs;
+pub mod scalar;
+pub mod vu;
+pub mod vu_arith;
+pub mod vu_logic_cmp;
+pub mod vu_lsu;
+pub mod vu_recip;
 
 use serde::{Deserialize, Serialize};
 
 use crate::bus::Bus;
 use crate::trap::Trap;
+
+pub use regs::{Sp, SpAction};
+pub use vu::Vu;
 
 /// Size of RSP Data Memory (4 KiB).
 pub const DMEM_SIZE: usize = 4096;
@@ -20,44 +32,127 @@ pub trait RspBackend {
     fn run(&mut self, bus: &mut Bus, max_cycles: u64) -> Result<u64, Trap>;
 }
 
-/// Pure-Rust LLE RSP interpreter shell (SU lands in M3, VU in M4).
+/// Pure-Rust LLE RSP interpreter (SU in M3, VU in M4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterpRsp {
-    /// 4 KiB DMEM (`0x0400_0000..=0x0400_0FFF`).
-    pub dmem: Vec<u8>,
-    /// 4 KiB IMEM (`0x0400_1000..=0x0400_1FFF`).
-    pub imem: Vec<u8>,
-    /// 12-bit RSP program counter (wraps inside 4 KiB IMEM).
-    pub pc: u16,
-    /// True while SP_STATUS HALT bit is set (halted on power-on).
-    pub halted: bool,
+    /// 32×32-bit Scalar Unit GPRs (`gpr[0]` is hardwired to `0`).
+    pub gpr: [u32; 32],
+    /// COP2 Vector Unit (32×128-bit VPR, 48-bit accumulator, VCO/VCC/VCE, RCP/RSQ latches).
+    pub vu: Vu,
+    /// Pending branch delay-slot target (12-bit aligned IMEM offset), if active.
+    pub next_pc: Option<u16>,
+    /// Telemetry: total RSP instructions retired.
+    pub instructions_executed: u64,
 }
 
 impl InterpRsp {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            dmem: vec![0; DMEM_SIZE],
-            imem: vec![0; IMEM_SIZE],
-            pc: 0,
-            halted: true,
+            gpr: [0; 32],
+            vu: Vu::new(),
+            next_pc: None,
+            instructions_executed: 0,
         }
     }
 
-    pub fn read_reg(&self, offset: u32) -> Result<u32, Trap> {
-        Err(Trap::UnimplementedRegister {
-            device: "SP",
-            offset,
-            is_write: false,
-        })
+    pub fn reset(&mut self) {
+        self.gpr = [0; 32];
+        self.vu.reset();
+        self.next_pc = None;
+        self.instructions_executed = 0;
     }
 
-    pub fn write_reg(&mut self, offset: u32, _value: u32) -> Result<(), Trap> {
-        Err(Trap::UnimplementedRegister {
-            device: "SP",
-            offset,
-            is_write: true,
-        })
+    #[must_use]
+    #[inline]
+    pub fn gpr(&self, idx: usize) -> u32 {
+        if idx == 0 {
+            0
+        } else {
+            self.gpr[idx & 31]
+        }
+    }
+
+    #[inline]
+    pub fn set_gpr(&mut self, idx: usize, val: u32) {
+        let i = idx & 31;
+        if i != 0 {
+            self.gpr[i] = val;
+        }
+    }
+
+    /// Fetch a big-endian 32-bit instruction word from 4 KiB IMEM (wrapping mod 4096).
+    #[must_use]
+    #[inline]
+    pub fn fetch_imem(&self, bus: &Bus, addr: u16) -> u32 {
+        let a = (addr as usize) & 0x0FFC;
+        u32::from_be_bytes([
+            bus.sp_imem[a],
+            bus.sp_imem[a + 1],
+            bus.sp_imem[a + 2],
+            bus.sp_imem[a + 3],
+        ])
+    }
+
+    /// Read a byte from 4 KiB DMEM (wrapping mod 4096).
+    #[must_use]
+    #[inline]
+    pub fn read_dmem_u8(&self, bus: &Bus, addr: u32) -> u8 {
+        bus.sp_dmem[(addr as usize) & 0x0FFF]
+    }
+
+    /// Read a big-endian 16-bit halfword from 4 KiB DMEM (unaligned allowed, wraps byte-by-byte).
+    #[must_use]
+    #[inline]
+    pub fn read_dmem_u16(&self, bus: &Bus, addr: u32) -> u16 {
+        let b0 = self.read_dmem_u8(bus, addr);
+        let b1 = self.read_dmem_u8(bus, addr.wrapping_add(1));
+        u16::from_be_bytes([b0, b1])
+    }
+
+    /// Read a big-endian 32-bit word from 4 KiB DMEM (unaligned allowed, wraps byte-by-byte).
+    #[must_use]
+    #[inline]
+    pub fn read_dmem_u32(&self, bus: &Bus, addr: u32) -> u32 {
+        let b0 = self.read_dmem_u8(bus, addr);
+        let b1 = self.read_dmem_u8(bus, addr.wrapping_add(1));
+        let b2 = self.read_dmem_u8(bus, addr.wrapping_add(2));
+        let b3 = self.read_dmem_u8(bus, addr.wrapping_add(3));
+        u32::from_be_bytes([b0, b1, b2, b3])
+    }
+
+    /// Write a byte to 4 KiB DMEM (wrapping mod 4096).
+    #[inline]
+    pub fn write_dmem_u8(&self, bus: &mut Bus, addr: u32, val: u8) {
+        bus.sp_dmem[(addr as usize) & 0x0FFF] = val;
+    }
+
+    /// Write a big-endian 16-bit halfword to 4 KiB DMEM (unaligned allowed, wraps byte-by-byte).
+    #[inline]
+    pub fn write_dmem_u16(&self, bus: &mut Bus, addr: u32, val: u16) {
+        let bytes = val.to_be_bytes();
+        self.write_dmem_u8(bus, addr, bytes[0]);
+        self.write_dmem_u8(bus, addr.wrapping_add(1), bytes[1]);
+    }
+
+    /// Write a big-endian 32-bit word to 4 KiB DMEM (unaligned allowed, wraps byte-by-byte).
+    #[inline]
+    pub fn write_dmem_u32(&self, bus: &mut Bus, addr: u32, val: u32) {
+        let bytes = val.to_be_bytes();
+        self.write_dmem_u8(bus, addr, bytes[0]);
+        self.write_dmem_u8(bus, addr.wrapping_add(1), bytes[1]);
+        self.write_dmem_u8(bus, addr.wrapping_add(2), bytes[2]);
+        self.write_dmem_u8(bus, addr.wrapping_add(3), bytes[3]);
+    }
+
+    /// Execute one RSP Scalar instruction.
+    pub fn step(&mut self, bus: &mut Bus) -> Result<u64, Trap> {
+        let cycles = scalar::step_scalar(self, bus)?;
+        self.instructions_executed = self.instructions_executed.saturating_add(1);
+        if bus.sp.is_single_step() {
+            bus.sp.status |= Sp::STATUS_HALT;
+        }
+        Ok(cycles)
     }
 }
 
@@ -68,13 +163,12 @@ impl Default for InterpRsp {
 }
 
 impl RspBackend for InterpRsp {
-    fn run(&mut self, _bus: &mut Bus, _max_cycles: u64) -> Result<u64, Trap> {
-        if self.halted {
-            return Ok(0);
+    fn run(&mut self, bus: &mut Bus, max_cycles: u64) -> Result<u64, Trap> {
+        let mut elapsed = 0u64;
+        while elapsed < max_cycles && !bus.sp.is_halted() {
+            let c = self.step(bus)?;
+            elapsed = elapsed.saturating_add(c.max(1));
         }
-        Err(Trap::UnimplementedOpcode {
-            pc: u64::from(self.pc),
-            word: 0,
-        })
+        Ok(elapsed)
     }
 }

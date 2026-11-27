@@ -130,19 +130,27 @@ fn unmapped_windows_and_64bit_rcp_reads_trap() {
 fn unimplemented_mmio_registers_trap_instead_of_returning_zero() {
     let mut bus = Bus::new(true, true);
     assert_eq!(
-        bus.read_u32(0x0430_0000, CacheAttr::Uncached),
+        bus.read_u32(0x0430_00FC, CacheAttr::Uncached),
         Err(Trap::UnimplementedRegister {
             device: "MI",
-            offset: 0,
+            offset: 0x00FC,
             is_write: false,
         })
     );
     assert_eq!(
-        bus.write_u32(0x0460_0010, 1, CacheAttr::Uncached),
+        bus.write_u32(0x0460_00FC, 1, CacheAttr::Uncached),
         Err(Trap::UnimplementedRegister {
             device: "PI",
-            offset: 0x0010,
+            offset: 0x00FC,
             is_write: true,
+        })
+    );
+    assert_eq!(
+        bus.read_u32(0x0404_00FC, CacheAttr::Uncached),
+        Err(Trap::UnimplementedRegister {
+            device: "SP",
+            offset: 0x00FC,
+            is_write: false,
         })
     );
 }

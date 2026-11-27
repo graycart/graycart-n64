@@ -2,6 +2,8 @@
 //!
 //! Cited: N64brew — Memory map & SysAD access quirks
 //!   https://n64brew.dev/wiki/Memory_map · docs/02-bus-memory-dma.md
+//! Cited: N64brew — Reality Display Processor/Interface (DPC command DMA)
+//!   https://n64brew.dev/wiki/Reality_Display_Processor/Interface
 //! Cross-check: Graycart N64 Development Plan §3.5 (9th-bit RDRAM) & §5.1 (Trap, don't stub)
 
 pub mod isviewer;
@@ -12,17 +14,18 @@ mod tests;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ai::Ai;
+use crate::ai::{Ai, AiAction};
 use crate::cart::Cart;
-use crate::mi::Mi;
-use crate::pi::Pi;
+use crate::mi::{Mi, MI_INTR_AI, MI_INTR_DP, MI_INTR_PI, MI_INTR_SI, MI_INTR_SP, MI_INTR_VI};
+use crate::pi::{Pi, PiAction};
 use crate::pif::Pif;
-use crate::rdp::CpuRdpLle;
+use crate::rdp::{CpuRdpLle, RdpAction};
 use crate::ri::Ri;
-use crate::rsp::{DMEM_SIZE, IMEM_SIZE};
-use crate::si::Si;
+use crate::rsp::{Sp, SpAction, DMEM_SIZE, IMEM_SIZE};
+use crate::schedule::EventKind;
+use crate::si::{Si, SiAction};
 use crate::trap::Trap;
-use crate::vi::Vi;
+use crate::vi::{Vi, ViAction};
 
 pub use isviewer::{IsViewer, ISVIEWER_BASE, ISVIEWER_END, ISVIEWER_MAGIC};
 pub use rdram::Rdram;
@@ -132,10 +135,14 @@ pub const fn is_rcp_window(pa: u32) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bus {
     pub rdram: Rdram,
-    /// Mirror of RSP DMEM (`0x0400_0000..=0x0400_0FFF`) for CPU SysAD access.
+    /// RSP DMEM (`0x0400_0000..=0x0400_0FFF`, single source of truth for CPU & RSP).
     pub sp_dmem: Vec<u8>,
-    /// Mirror of RSP IMEM (`0x0400_1000..=0x0400_1FFF`) for CPU SysAD access.
+    /// RSP IMEM (`0x0400_1000..=0x0400_1FFF`, single source of truth for CPU & RSP).
     pub sp_imem: Vec<u8>,
+    /// RSP (SP) MMIO registers and 2D DMA state (`0x0404_0000..=0x040B_FFFF`).
+    pub sp: Sp,
+    /// RDP DPC/DPS MMIO (`0x0410_0000` / `0x0420_0000`). Single source of truth.
+    pub rdp: CpuRdpLle,
     pub mi: Mi,
     pub vi: Vi,
     pub ai: Ai,
@@ -146,6 +153,11 @@ pub struct Bus {
     pub isviewer: IsViewer,
     pub cart: Option<Cart>,
     pub isviewer_enabled: bool,
+    /// Pending PI DMA byte count for `complete_pi_dma`.
+    pub pending_pi_len: u32,
+    /// Out-of-band scheduler events queued by MMIO DMA triggers (drained by `N64Core`).
+    #[serde(skip)]
+    pub pending_events: Vec<(u64, EventKind)>,
 }
 
 impl Bus {
@@ -155,6 +167,8 @@ impl Bus {
             rdram: Rdram::new(expansion_pak),
             sp_dmem: vec![0; DMEM_SIZE],
             sp_imem: vec![0; IMEM_SIZE],
+            sp: Sp::new(),
+            rdp: CpuRdpLle::new(),
             mi: Mi::new(),
             vi: Vi::new(),
             ai: Ai::new(),
@@ -165,16 +179,73 @@ impl Bus {
             isviewer: IsViewer::new(),
             cart: None,
             isviewer_enabled,
+            pending_pi_len: 0,
+            pending_events: Vec::new(),
         }
+    }
+
+    /// Drain queued peripheral scheduler requests into the master scheduler.
+    pub fn drain_pending_events(&mut self) -> Vec<(u64, EventKind)> {
+        std::mem::take(&mut self.pending_events)
+    }
+
+    /// Complete an in-flight PI DMA (clears `PI_STATUS.DMA_BUSY`, asserts `MI_INTR_PI`).
+    pub fn complete_pi_dma(&mut self) {
+        let len = self.pending_pi_len;
+        self.pending_pi_len = 0;
+        self.pi.complete_dma(len);
+        self.mi.set_intr(MI_INTR_PI);
+    }
+
+    /// Complete an in-flight SI DMA (clears `SI_STATUS.DMA_BUSY`, asserts `MI_INTR_SI`).
+    pub fn complete_si_dma(&mut self) {
+        self.si.complete_dma();
+        self.mi.set_intr(MI_INTR_SI);
+    }
+
+    /// Complete an in-flight SP DMA (clears `SP_STATUS.DMA_BUSY`).
+    pub fn complete_sp_dma(&mut self) {
+        self.sp.complete_dma();
+    }
+
+    /// Execute immediate-data Cart → RDRAM PI DMA copy (interrupt delayed per §3.3).
+    fn copy_cart_to_rdram(&mut self, dram_addr: u32, cart_addr: u32, len: u32) {
+        let rom = self.cart.as_ref().map(Cart::rom).unwrap_or(&[]);
+        for i in 0..len {
+            let ca = cart_addr.wrapping_add(i);
+            let byte = if ca >= 0x1000_0000 {
+                let off = (ca - 0x1000_0000) as usize;
+                rom.get(off).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            self.rdram.write_u8(dram_addr.wrapping_add(i), byte);
+        }
+    }
+
+    /// Copy 64 bytes from PIF RAM into RDRAM at `dram_addr` (running Joybus HLE first).
+    fn copy_pif_to_rdram(&mut self, dram_addr: u32) {
+        self.pif.execute_joybus();
+        for (i, &b) in self.pif.ram.iter().enumerate() {
+            self.rdram.write_u8(dram_addr.wrapping_add(i as u32), b);
+        }
+    }
+
+    /// Copy 64 bytes from RDRAM at `dram_addr` into PIF RAM and run PIF write commands.
+    fn copy_rdram_to_pif(&mut self, dram_addr: u32) {
+        for i in 0..self.pif.ram.len() {
+            self.pif.ram[i] = self.rdram.read_u8(dram_addr.wrapping_add(i as u32));
+        }
+        self.pif.process_write_command();
     }
 
     pub fn attach_cart(&mut self, cart: Cart) {
         self.cart = Some(cart);
     }
 
-    /// Copy up to 1 MiB from cart offset `0x1000` into RDRAM `0x0000_1000`
-    /// for young-CPU soft-boot test suites (e.g. Dillonb `n64-tests`).
-    pub fn copy_cart_soft_boot(&mut self) {
+    /// Copy up to 1 MiB from cart offset `0x1000` into RDRAM at `entry_pc & 0x1FFF_FFFF`
+    /// (matching IPL3's 1 MiB program load destination for soft-boot test suites).
+    pub fn copy_cart_soft_boot(&mut self, entry_pc: u32) {
         let Some(cart) = &self.cart else {
             return;
         };
@@ -182,10 +253,14 @@ impl Bus {
         if rom.len() <= 0x1000 {
             return;
         }
+        let dst_off = (entry_pc & 0x1FFF_FFFF) as usize;
+        if dst_off >= self.rdram.len() {
+            return;
+        }
         let available = (rom.len() - 0x1000).min(0x0010_0000);
-        let dst_cap = self.rdram.len().saturating_sub(0x1000);
+        let dst_cap = self.rdram.len().saturating_sub(dst_off);
         let copy_len = available.min(dst_cap);
-        self.rdram.as_mut_slice()[0x1000..0x1000 + copy_len]
+        self.rdram.as_mut_slice()[dst_off..dst_off + copy_len]
             .copy_from_slice(&rom[0x1000..0x1000 + copy_len]);
     }
 
@@ -263,6 +338,89 @@ impl Bus {
         }
     }
 
+    /// Read a big-endian 16-bit halfword at physical address `pa`.
+    pub fn read_u16(&self, pa: u32, cache: CacheAttr) -> Result<u16, Trap> {
+        if pa & 1 != 0 {
+            return Err(Trap::MisalignedAccess { pa, size: 2 });
+        }
+        let region = self.check_access(pa, 2, false, cache)?;
+        match region {
+            PhysRegion::Rdram => self.rdram.read_u16(pa),
+            PhysRegion::RspDmem => {
+                let idx = (pa & 0x0FFF) as usize;
+                Ok(u16::from_be_bytes([
+                    self.sp_dmem[idx],
+                    self.sp_dmem[idx + 1],
+                ]))
+            }
+            PhysRegion::RspImem => {
+                let idx = (pa & 0x0FFF) as usize;
+                Ok(u16::from_be_bytes([
+                    self.sp_imem[idx],
+                    self.sp_imem[idx + 1],
+                ]))
+            }
+            PhysRegion::IsViewer => {
+                let off = pa - ISVIEWER_BASE;
+                Ok(u16::from_be_bytes([
+                    self.isviewer.read_u8(off),
+                    self.isviewer.read_u8(off + 1),
+                ]))
+            }
+            PhysRegion::CartRom => {
+                let offset = (pa - 0x1000_0000) as usize;
+                let rom = self.cart.as_ref().map(Cart::rom).unwrap_or(&[]);
+                if offset + 2 <= rom.len() {
+                    Ok(u16::from_be_bytes([rom[offset], rom[offset + 1]]))
+                } else {
+                    Ok(0)
+                }
+            }
+            PhysRegion::PifRam => {
+                let idx = (pa - 0x1FC0_07C0) as usize;
+                Ok(u16::from_be_bytes([
+                    self.pif.ram[idx],
+                    self.pif.ram[idx + 1],
+                ]))
+            }
+            other => Err(self.unimplemented_region_trap(other, pa, false)),
+        }
+    }
+
+    /// Write a big-endian 16-bit halfword at physical address `pa`.
+    pub fn write_u16(&mut self, pa: u32, val: u16, cache: CacheAttr) -> Result<(), Trap> {
+        if pa & 1 != 0 {
+            return Err(Trap::MisalignedAccess { pa, size: 2 });
+        }
+        let region = self.check_access(pa, 2, true, cache)?;
+        match region {
+            PhysRegion::Rdram => self.rdram.write_u16(pa, val),
+            PhysRegion::RspDmem => {
+                let idx = (pa & 0x0FFF) as usize;
+                self.sp_dmem[idx..idx + 2].copy_from_slice(&val.to_be_bytes());
+                Ok(())
+            }
+            PhysRegion::RspImem => {
+                let idx = (pa & 0x0FFF) as usize;
+                self.sp_imem[idx..idx + 2].copy_from_slice(&val.to_be_bytes());
+                Ok(())
+            }
+            PhysRegion::IsViewer => {
+                let off = pa - ISVIEWER_BASE;
+                let bytes = val.to_be_bytes();
+                self.isviewer.write_u8(off, bytes[0]);
+                self.isviewer.write_u8(off + 1, bytes[1]);
+                Ok(())
+            }
+            PhysRegion::PifRam => {
+                let idx = (pa - 0x1FC0_07C0) as usize;
+                self.pif.ram[idx..idx + 2].copy_from_slice(&val.to_be_bytes());
+                Ok(())
+            }
+            other => Err(self.unimplemented_region_trap(other, pa, true)),
+        }
+    }
+
     /// Read a big-endian 32-bit word at physical address `pa`.
     pub fn read_u32(&self, pa: u32, cache: CacheAttr) -> Result<u32, Trap> {
         if pa & 3 != 0 {
@@ -289,14 +447,15 @@ impl Bus {
                     self.sp_imem[idx + 3],
                 ]))
             }
+            PhysRegion::RspRegs => self.sp.read_reg(pa - 0x0404_0000),
             PhysRegion::MiRegs => self.mi.read_reg(pa & 0xFFFF),
             PhysRegion::ViRegs => self.vi.read_reg(pa & 0xFFFF),
             PhysRegion::AiRegs => self.ai.read_reg(pa & 0xFFFF),
             PhysRegion::PiRegs => self.pi.read_reg(pa & 0xFFFF),
             PhysRegion::RiRegs => self.ri.read_reg(pa & 0xFFFF),
             PhysRegion::SiRegs => self.si.read_reg(pa & 0xFFFF),
-            PhysRegion::RdpCmdRegs => CpuRdpLle::new().read_cmd_reg(pa & 0xFFFF),
-            PhysRegion::RdpSpanRegs => CpuRdpLle::new().read_span_reg(pa & 0xFFFF),
+            PhysRegion::RdpCmdRegs => self.rdp.read_cmd_reg(pa & 0xFFFF),
+            PhysRegion::RdpSpanRegs => self.rdp.read_span_reg(pa & 0xFFFF),
             PhysRegion::IsViewer => Ok(self.isviewer.read_u32(pa - ISVIEWER_BASE)),
             PhysRegion::CartRom => {
                 let offset = (pa - 0x1000_0000) as usize;
@@ -343,14 +502,140 @@ impl Bus {
                 self.sp_imem[idx..idx + 4].copy_from_slice(&val.to_be_bytes());
                 Ok(())
             }
+            PhysRegion::RspRegs => {
+                match self.sp.write_reg_action(pa - 0x0404_0000, val)? {
+                    SpAction::StartDmaRd {
+                        mem_addr,
+                        dram_addr,
+                        len_reg,
+                        delay_cycles,
+                    } => {
+                        self.sp.execute_dma_rd(
+                            &self.rdram,
+                            &mut self.sp_dmem,
+                            &mut self.sp_imem,
+                            mem_addr,
+                            dram_addr,
+                            len_reg,
+                        );
+                        if delay_cycles == 0 {
+                            self.sp.complete_dma();
+                        } else {
+                            self.pending_events
+                                .push((delay_cycles, EventKind::SpDmaComplete));
+                        }
+                    }
+                    SpAction::StartDmaWr {
+                        mem_addr,
+                        dram_addr,
+                        len_reg,
+                        delay_cycles,
+                    } => {
+                        self.sp.execute_dma_wr(
+                            &mut self.rdram,
+                            &self.sp_dmem,
+                            &self.sp_imem,
+                            mem_addr,
+                            dram_addr,
+                            len_reg,
+                        );
+                        if delay_cycles == 0 {
+                            self.sp.complete_dma();
+                        } else {
+                            self.pending_events
+                                .push((delay_cycles, EventKind::SpDmaComplete));
+                        }
+                    }
+                    SpAction::ClearIntr => self.mi.clear_intr(MI_INTR_SP),
+                    SpAction::SetIntr => self.mi.set_intr(MI_INTR_SP),
+                    SpAction::None => {}
+                }
+                Ok(())
+            }
             PhysRegion::MiRegs => self.mi.write_reg(pa & 0xFFFF, val),
-            PhysRegion::ViRegs => self.vi.write_reg(pa & 0xFFFF, val),
-            PhysRegion::AiRegs => self.ai.write_reg(pa & 0xFFFF, val),
-            PhysRegion::PiRegs => self.pi.write_reg(pa & 0xFFFF, val),
+            PhysRegion::ViRegs => {
+                if let ViAction::ClearIntr = self.vi.write_reg_action(pa & 0xFFFF, val)? {
+                    self.mi.clear_intr(MI_INTR_VI);
+                }
+                Ok(())
+            }
+            PhysRegion::AiRegs => {
+                match self.ai.write_reg_action(pa & 0xFFFF, val)? {
+                    AiAction::StartDma { delay_cycles } => {
+                        self.pending_events
+                            .push((delay_cycles, EventKind::AiDmaStep));
+                    }
+                    AiAction::ClearIntr => self.mi.clear_intr(MI_INTR_AI),
+                    AiAction::None => {}
+                }
+                Ok(())
+            }
+            PhysRegion::PiRegs => {
+                match self.pi.write_reg_action(pa & 0xFFFF, val)? {
+                    PiAction::StartCartToRdram {
+                        dram_addr,
+                        cart_addr,
+                        len,
+                        delay_cycles,
+                    } => {
+                        // Immediate-data / delayed-MI-interrupt PI DMA (§3.3).
+                        self.copy_cart_to_rdram(dram_addr, cart_addr, len);
+                        self.pending_pi_len = len;
+                        self.pending_events
+                            .push((delay_cycles, EventKind::PiDmaComplete));
+                    }
+                    PiAction::StartRdramToCart {
+                        len, delay_cycles, ..
+                    } => {
+                        self.pending_pi_len = len;
+                        self.pending_events
+                            .push((delay_cycles, EventKind::PiDmaComplete));
+                    }
+                    PiAction::ClearIntr => self.mi.clear_intr(MI_INTR_PI),
+                    PiAction::Reset => {
+                        self.pending_pi_len = 0;
+                    }
+                    PiAction::None => {}
+                }
+                Ok(())
+            }
             PhysRegion::RiRegs => self.ri.write_reg(pa & 0xFFFF, val),
-            PhysRegion::SiRegs => self.si.write_reg(pa & 0xFFFF, val),
-            PhysRegion::RdpCmdRegs => CpuRdpLle::new().write_cmd_reg(pa & 0xFFFF, val),
-            PhysRegion::RdpSpanRegs => CpuRdpLle::new().write_span_reg(pa & 0xFFFF, val),
+            PhysRegion::SiRegs => {
+                match self.si.write_reg_action(pa & 0xFFFF, val)? {
+                    SiAction::DmaPifToRdram {
+                        dram_addr,
+                        delay_cycles,
+                    } => {
+                        self.copy_pif_to_rdram(dram_addr);
+                        self.pending_events
+                            .push((delay_cycles, EventKind::SiDmaComplete));
+                    }
+                    SiAction::DmaRdramToPif {
+                        dram_addr,
+                        delay_cycles,
+                    } => {
+                        self.copy_rdram_to_pif(dram_addr);
+                        self.pending_events
+                            .push((delay_cycles, EventKind::SiDmaComplete));
+                    }
+                    SiAction::ClearIntr => self.mi.clear_intr(MI_INTR_SI),
+                    SiAction::None => {}
+                }
+                Ok(())
+            }
+            PhysRegion::RdpCmdRegs => {
+                let action = self.rdp.write_cmd_reg_action(pa & 0xFFFF, val)?;
+                self.apply_rdp_action(action);
+                self.pump_dpc_fifo()?;
+                Ok(())
+            }
+            PhysRegion::RdpSpanRegs => {
+                match self.rdp.write_span_reg_action(pa & 0xFFFF, val)? {
+                    RdpAction::RaiseDpIntr => self.mi.set_intr(MI_INTR_DP),
+                    RdpAction::None => {}
+                }
+                Ok(())
+            }
             PhysRegion::IsViewer => {
                 self.isviewer.write_u32(pa - ISVIEWER_BASE, val);
                 Ok(())
@@ -358,6 +643,9 @@ impl Bus {
             PhysRegion::PifRam => {
                 let idx = (pa - 0x1FC0_07C0) as usize;
                 self.pif.ram[idx..idx + 4].copy_from_slice(&val.to_be_bytes());
+                if idx == 60 {
+                    self.pif.process_write_command();
+                }
                 Ok(())
             }
             other => Err(self.unimplemented_region_trap(other, pa, true)),
@@ -391,6 +679,68 @@ impl Bus {
         }
     }
 
+    fn apply_rdp_action(&mut self, action: RdpAction) {
+        if let RdpAction::RaiseDpIntr = action {
+            self.mi.set_intr(MI_INTR_DP);
+        }
+    }
+
+    /// Copy 64-bit big-endian command words from `CURRENT` toward `active_end`
+    /// and run them. XBUS selects `sp_dmem` (low 12 bits); otherwise RDRAM.
+    ///
+    /// FREEZE and FLUSH hold the fetch. A second buffered START/END pair is
+    /// pulled in after the first list retires (`complete_cmd_dma`).
+    fn pump_dpc_fifo(&mut self) -> Result<(), Trap> {
+        for _ in 0..8 {
+            if !dpc_fetch_pending(&self.rdp) {
+                return Ok(());
+            }
+            let words = self.collect_dpc_words()?;
+            if words.is_empty() {
+                return Ok(());
+            }
+            let action = {
+                let rdp = &mut self.rdp;
+                let rdram = &mut self.rdram;
+                rdp.submit_commands(&words, rdram)?
+            };
+            self.apply_rdp_action(action);
+        }
+        Ok(())
+    }
+
+    fn collect_dpc_words(&self) -> Result<Vec<u64>, Trap> {
+        let mut addr = self.rdp.dpc_current;
+        let end = self.rdp.dpc_active_end;
+        let mut words = Vec::new();
+        while addr < end {
+            let next = addr.saturating_add(8);
+            if next > end {
+                break;
+            }
+            words.push(self.read_dpc_word(addr)?);
+            addr = next;
+        }
+        Ok(words)
+    }
+
+    fn read_dpc_word(&self, addr: u32) -> Result<u64, Trap> {
+        if self.rdp.dpc_status & CpuRdpLle::STATUS_XBUS_DMEM_DMA != 0 {
+            let off = (addr as usize) & 0x0FFF;
+            if off + 8 > self.sp_dmem.len() {
+                return Err(Trap::UnmappedFreeze {
+                    pa: addr,
+                    size: 8,
+                    is_write: false,
+                });
+            }
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&self.sp_dmem[off..off + 8]);
+            return Ok(u64::from_be_bytes(buf));
+        }
+        self.rdram.read_u64(addr)
+    }
+
     fn unimplemented_region_trap(&self, region: PhysRegion, pa: u32, is_write: bool) -> Trap {
         let device = match region {
             PhysRegion::RdramRegs => "RDRAM_REGS",
@@ -416,4 +766,9 @@ impl Bus {
             is_write,
         }
     }
+}
+
+fn dpc_fetch_pending(rdp: &CpuRdpLle) -> bool {
+    let blocked = CpuRdpLle::STATUS_FREEZE | CpuRdpLle::STATUS_FLUSH;
+    (rdp.dpc_status & blocked) == 0 && rdp.dpc_current < rdp.dpc_active_end
 }

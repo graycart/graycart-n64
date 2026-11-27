@@ -13,6 +13,9 @@ fn synthetic_z64(title: &str, entry_pc: u32) -> Vec<u8> {
     rom[8..12].copy_from_slice(&entry_pc.to_be_bytes());
     let tb = title.as_bytes();
     rom[0x20..0x20 + tb.len().min(20)].copy_from_slice(&tb[..tb.len().min(20)]);
+    // Place an explicitly reserved/unimplemented MIPS III opcode (0x7000_0000, op 0x1C) at
+    // entry offset 0x1000 so the CLI smoke test reliably verifies trap exit code 2.
+    rom[0x1000..0x1004].copy_from_slice(&0x7000_0000u32.to_be_bytes());
     rom
 }
 
