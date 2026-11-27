@@ -178,6 +178,15 @@ impl N64Core {
                 Ok(elapsed) => {
                     let step = elapsed.max(1);
                     self.scheduler.advance(step);
+                    while let Some(ev) = self.scheduler.pop_due() {
+                        if ev.kind == EventKind::CompareMatch {
+                            self.cpu
+                                .cop0
+                                .count_clock
+                                .on_compare_event(&mut self.scheduler);
+                            self.cpu.cop0.sync_timer_ip7();
+                        }
+                    }
                 }
                 Err(trap) => {
                     return RunOutcome::Trapped {

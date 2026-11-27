@@ -15,7 +15,7 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | Milestone | Status | Gate Receipt Summary |
 |---|---|---|
 | **M0 — Scaffold** | **Done** (PR #2 merged, CI green 3/3 OS) | 21 passed (15 unit, 3 CLI smoke, 3 ROM harness), 0 failed, 3 ignored matrix stubs compiled; fmt/clippy `-D warnings` clean; macOS/Ubuntu/Windows CI green; zero forbidden binaries tracked |
-| **M1 — CPU functional** | **In Progress (`feat/m1-cpu` — M1.0 + Wave A done)** | 66 passed (59 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; Wave A 5/5 integer ISA families implemented by parallel `flash_lite` workers & reviewed; next: Wave B (COP0/Exceptions, TLB, COP1 FPU, Caches) |
+| **M1 — CPU functional** | **Wave A + Wave B Complete (`feat/m1-cpu`, awaiting M2 PI/VI/SI for full Dillonb/systemtest ROM exit gate)** | 100 passed (93 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; zero CPU opcode traps across all 26 Dillonb ROMs & 8 local commercial carts (GoldenEye booted into TLB-mapped `0x70000584`, SM64/DK64/MM reached `SI_STATUS 0x0018`) |
 | **M2 — Bus + boot** | Not started | — |
 | **M3 — RSP scalar + DMA** | Not started | — |
 | **M4 — RSP vector unit** | Not started | — |
@@ -29,6 +29,24 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | **M12 — Optional dynarec + Family API extract** | Not started | — |
 
 ## Receipts
+
+### M1 Wave B — COP0/Exceptions, 32-Entry TLB, COP1 FPU & L1 Caches (`feat/m1-cpu`, 2026-11-27)
+
+- Orchestrator M1.B0 seam (`src/cpu/{mod,mmu,exceptions,decode}.rs`, `CountClock` `CompareMatch` dispatch in `src/lib.rs`) + 4 parallel `flash_lite` Wave B workers (`cop0.rs`, `tlb.rs`, `cop1.rs`, `cache.rs`).
+- Orchestrator review caught & fixed 6 hardware edge bugs before merge: `REGIMM` trap sign-extension before unsigned compare, `XContext.R` bit position (`<< 31`), `EntryHi.VPN2` 64-bit mask, `ERET` preserving `EPC`/`ErrorEPC` untouched, uninitialized TLB entries using KSEG0 sentinel `0x8000_0000` (so VA `0x0000_0000` raises TLB Refill instead of Invalid), `ROUND.W`/`ROUND.L` always ties-to-even independent of `FCR31.RM`, and `CACHE` `0x0D` (`Create Dirty Exclusive`) translating VA via MMU + calling `raise_exception`.
+- Local validation (Windows PowerShell, `RUST_MIN_STACK=16777216`):
+  - `cargo fmt --check` → exit `0`
+  - `cargo clippy --all-targets --all-features -- -D warnings` → exit `0` (0 lint warnings)
+  - `cargo test` → exit `0`:
+    - `src/lib.rs` unit tests: **93 passed; 0 failed; 0 ignored** (+34 new unit tests across COP0/Exceptions, TLB, COP1 FPU, and L1 I/D Caches)
+    - `tests/cli_smoke.rs`: **3 passed; 0 failed; 0 ignored**
+    - `tests/roms/main.rs`: **4 passed; 0 failed; 5 ignored**
+- Local commercial cart progress board (`..\carts\n64`, local-only):
+  - **Zero unimplemented CPU opcodes across all 8 carts and all 26 Dillonb ROMs.**
+  - **GoldenEye 007:** programmed the TLB, jumped into TLB-mapped KUSEG (`PC 0x0000000070000584`), and executed **200,000+ instructions** cleanly.
+  - **Super Mario 64** (`115,069` insts), **Donkey Kong 64** (`15,258` insts), and **Zelda: Majora's Mask** (`16,311` insts): cleared `MFC0 Status` + CPU/cache init and reached `SI_STATUS` (`0x0018`, M2).
+  - **Ocarina of Time**, **Mario Kart 64**, and **Super Smash Bros.**: running cleanly past `200,000` instructions.
+  - **Star Wars Ep. I Racer** (`17` insts) & **Dillonb 26 ROMs**: waiting strictly on M2 `PI`/`VI` registers.
 
 ### M1.0 + Wave A — VR4300 Integer ISA (`feat/m1-cpu`, 2026-11-27)
 

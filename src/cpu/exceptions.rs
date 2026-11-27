@@ -1,4 +1,4 @@
-//! VR4300 architectural exception definitions (M1.0 seam; Wave B wires COP0 vectoring).
+//! VR4300 architectural exception definitions (M1 Wave B).
 //!
 //! Cited: NEC VR4300, VR4305, VR4310 User's Manual (U10504EJ7V0UMJ1), Chapter 6 (Exceptions)
 //!   via docs/01-cpu-r4300i.md
@@ -12,10 +12,10 @@ pub enum CpuException {
     Interrupt,
     /// TLB modification exception (`ExcCode = 1`).
     TlbModification { bad_vaddr: u64 },
-    /// TLB miss on load or instruction fetch (`ExcCode = 2`).
-    TlbLoad { bad_vaddr: u64 },
-    /// TLB miss on store (`ExcCode = 3`).
-    TlbStore { bad_vaddr: u64 },
+    /// TLB miss on load or instruction fetch (`ExcCode = 2`; `refill = true` uses TLB Refill vector).
+    TlbLoad { bad_vaddr: u64, refill: bool },
+    /// TLB miss on store (`ExcCode = 3`; `refill = true` uses TLB Refill vector).
+    TlbStore { bad_vaddr: u64, refill: bool },
     /// Address error on load or instruction fetch (`ExcCode = 4`).
     AddressErrorLoad { bad_vaddr: u64 },
     /// Address error on store (`ExcCode = 5`).
@@ -26,7 +26,7 @@ pub enum CpuException {
     Breakpoint,
     /// Reserved instruction (`ExcCode = 10`).
     ReservedInstruction,
-    /// Coprocessor unusable (`ExcCode = 11`).
+    /// Coprocessor unusable (`ExcCode = 11`, `unit` placed into `Cause.CE`).
     CoprocessorUnusable { unit: u8 },
     /// Signed integer arithmetic overflow (`ExcCode = 12`).
     ArithmeticOverflow,
@@ -82,11 +82,29 @@ impl CpuException {
     pub const fn bad_vaddr(self) -> Option<u64> {
         match self {
             Self::TlbModification { bad_vaddr }
-            | Self::TlbLoad { bad_vaddr }
-            | Self::TlbStore { bad_vaddr }
+            | Self::TlbLoad { bad_vaddr, .. }
+            | Self::TlbStore { bad_vaddr, .. }
             | Self::AddressErrorLoad { bad_vaddr }
             | Self::AddressErrorStore { bad_vaddr } => Some(bad_vaddr),
             _ => None,
         }
+    }
+
+    /// Returns `true` if this is a TLB Refill (no matching entry) vs TLB Invalid/Mod.
+    #[must_use]
+    pub const fn is_tlb_refill(self) -> bool {
+        matches!(
+            self,
+            Self::TlbLoad { refill: true, .. } | Self::TlbStore { refill: true, .. }
+        )
+    }
+
+    /// Returns `true` if this exception populates `Context` / `XContext` / `EntryHi.VPN2`.
+    #[must_use]
+    pub const fn is_tlb_exception(self) -> bool {
+        matches!(
+            self,
+            Self::TlbModification { .. } | Self::TlbLoad { .. } | Self::TlbStore { .. }
+        )
     }
 }

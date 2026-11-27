@@ -79,7 +79,7 @@ pub fn exec_primary(cpu: &mut InterpCpu, bus: &mut Bus, pc: u64, inst: Inst) -> 
         _ => va,
     };
 
-    let (pa, cache) = match mmu::translate_va(trans_va, is_write) {
+    let (pa, cache) = match mmu::translate_va_cpu(cpu, trans_va, is_write) {
         Ok(pair) => pair,
         Err(exc) => return Err(cpu.raise_exception(pc, exc)),
     };
