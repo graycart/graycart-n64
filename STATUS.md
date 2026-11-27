@@ -5,7 +5,7 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 ## Active Milestone
 
-- **Current:** `M0 — Scaffold` (in progress)
+- **Current:** `M1 — CPU functional` (ready to begin locally using [`docs/ORCHESTRATOR-HANDOFF.md`](./docs/ORCHESTRATOR-HANDOFF.md))
 - **Bespoke Vulkan Compute LLE RDP Name:** **`EdgeWalker`** (zero third-party RDP forks/FFI)
 - **Pre-code gate:** Accepted by Dave on 2026-11-27
 
@@ -13,8 +13,8 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 | Milestone | Status | Gate Receipt Summary |
 |---|---|---|
-| **M0 — Scaffold** | Awaiting Dave receipt review | 21 passed (15 unit, 3 CLI smoke, 3 ROM harness), 0 failed, 3 ignored matrix stubs compiled; fmt/clippy `-D warnings` clean; zero forbidden binaries tracked |
-| **M1 — CPU functional** | Not started | — |
+| **M0 — Scaffold** | **Done** (PR #2 merged, CI green 3/3 OS) | 21 passed (15 unit, 3 CLI smoke, 3 ROM harness), 0 failed, 3 ignored matrix stubs compiled; fmt/clippy `-D warnings` clean; macOS/Ubuntu/Windows CI green; zero forbidden binaries tracked |
+| **M1 — CPU functional** | Ready (next) | See `docs/ORCHESTRATOR-HANDOFF.md` §4 for M1.0 seam + Wave A (5 parallel workers) + Wave B (4 parallel workers) |
 | **M2 — Bus + boot** | Not started | — |
 | **M3 — RSP scalar + DMA** | Not started | — |
 | **M4 — RSP vector unit** | Not started | — |
@@ -29,18 +29,23 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 
 ## Receipts
 
-### M0 — Scaffold (`feat/m0-scaffold`, 2026-11-27)
+### M0 — Scaffold (`feat/m0-scaffold` / PR #2, 2026-11-27)
 
-- `cargo fmt --check` → exit `0`
-- `cargo clippy --all-targets --all-features -- -D warnings` → exit `0` (0 warnings)
-- `RUST_MIN_STACK=16777216 cargo test` → exit `0`:
-  - `src/lib.rs` unit tests: **15 passed; 0 failed; 0 ignored** (core serde round-trip, anti-stub traps, full physical decode map, cached-MMIO freeze, unmapped & 64-bit RCP freezes, RDRAM 4/8 MiB + bit-packed 9th-bit array, ISViewer ring buffer + wrap, 2/3 RCP rational accumulator, deterministic event queue + single-step mode, Count/Compare mid-slice & 32-bit wrap-safe scheduling, `.z64`/`.v64`/`.n64` normalization, header parse, CIC CRC32 table)
-  - `tests/cli_smoke.rs`: **3 passed; 0 failed; 0 ignored** (`--version`/`--help`, synthetic ROM run + `--hash-out` + explicit M0 CPU trap at soft-boot entry PC, ISViewer public API stream capture)
-  - `tests/roms/main.rs`: **3 passed; 0 failed; 3 ignored** (`tests/fixtures/README.md` + `peterlemon-manifest.json` validation, `n64-systemtest` / `nemu64-test` ISViewer log parser, missing-fixture `BootFail`; ignored matrix stubs `matrix_dillonb_basic`, `matrix_n64_systemtest_base`, `matrix_nemu64_test_base`)
-- `cargo test --tests --no-run` → exit `0` (all ignored ROM harness targets compile cleanly)
-- `cargo run -- --version` → `graycart-n64 0.0.1`
-- `bash -n scripts/fetch-suites.sh && bash scripts/fetch-suites.sh --dry-run` → exit `0`
-- Forbidden-binary git check → `Clean: no forbidden binaries tracked`
+- Local validation:
+  - `cargo fmt --check` → exit `0`
+  - `cargo clippy --all-targets --all-features -- -D warnings` → exit `0` (0 warnings)
+  - `RUST_MIN_STACK=16777216 cargo test` → exit `0`:
+    - `src/lib.rs` unit tests: **15 passed; 0 failed; 0 ignored** (core serde round-trip, anti-stub traps, full physical decode map, cached-MMIO freeze, unmapped & 64-bit RCP freezes, RDRAM 4/8 MiB + bit-packed 9th-bit array, ISViewer ring buffer + wrap, 2/3 RCP rational accumulator, deterministic event queue + single-step mode, Count/Compare mid-slice & 32-bit wrap-safe scheduling, `.z64`/`.v64`/`.n64` normalization, header parse, CIC CRC32 table)
+    - `tests/cli_smoke.rs`: **3 passed; 0 failed; 0 ignored** (`--version`/`--help`, synthetic ROM run + `--hash-out` + explicit M0 CPU trap at soft-boot entry PC, ISViewer public API stream capture)
+    - `tests/roms/main.rs`: **3 passed; 0 failed; 3 ignored** (`tests/fixtures/README.md` + `peterlemon-manifest.json` validation, `n64-systemtest` / `nemu64-test` ISViewer log parser, missing-fixture `BootFail`; ignored matrix stubs `matrix_dillonb_basic`, `matrix_n64_systemtest_base`, `matrix_nemu64_test_base`)
+  - `cargo test --tests --no-run` → exit `0` (all ignored ROM harness targets compile cleanly)
+  - `cargo run -- --version` → `graycart-n64 0.0.1`
+  - `bash -n scripts/fetch-suites.sh && bash scripts/fetch-suites.sh --dry-run` → exit `0`
+  - Forbidden-binary git check → `Clean: no forbidden binaries tracked`
+- GitHub Actions CI (PR #2):
+  - `macos-latest`: **pass** (31s)
+  - `ubuntu-latest`: **pass** (1m1s)
+  - `windows-latest`: **pass** (1m47s)
 
 ## Ruled Out
 

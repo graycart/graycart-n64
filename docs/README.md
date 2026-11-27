@@ -55,6 +55,7 @@ Provenance archives (excerpts, licenses, retrieved dates): **[provenance/](./pro
 | [07-test-strategy.md](./07-test-strategy.md) | Suites, traces, CI acceptance | Written |
 | [08-implementation-plan.md](./08-implementation-plan.md) | Phased implement/test plan (signed off 2026-11-27) | Written |
 | [DEVELOPMENT-PLAN.md](./DEVELOPMENT-PLAN.md) | Ratified working plan (M0–M12, `EdgeWalker`, §3 amendments) | Active |
+| [ORCHESTRATOR-HANDOFF.md](./ORCHESTRATOR-HANDOFF.md) | Local continuation braindump + multi-subagent orchestration playbook | Active |
 | [PHASES.md](./PHASES.md) | Phase checklist / milestones | Written |
 | [09-graphics-plugin-accuracy.md](./09-graphics-plugin-accuracy.md) | LLE RDP vs HLE microcode tradeoffs | Written |
 | [10-family-api-and-reuse.md](./10-family-api-and-reuse.md) | Graycart family API + reuse notes | Written |

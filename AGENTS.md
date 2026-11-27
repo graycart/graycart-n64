@@ -1,6 +1,6 @@
 # Agent guidelines — Graycart (`graycart-n64`)
 
-Canonical norms for changing this emulator. Aligned with [`docs/AGENTS.md`](./docs/AGENTS.md), [`ATTRIBUTION.md`](./ATTRIBUTION.md), [`THIRD_PARTY.md`](./THIRD_PARTY.md), and [`docs/DEVELOPMENT-PLAN.md`](./docs/DEVELOPMENT-PLAN.md).
+Canonical norms for changing this emulator. Aligned with [`docs/AGENTS.md`](./docs/AGENTS.md), [`ATTRIBUTION.md`](./ATTRIBUTION.md), [`THIRD_PARTY.md`](./THIRD_PARTY.md), [`docs/DEVELOPMENT-PLAN.md`](./docs/DEVELOPMENT-PLAN.md), and [`docs/ORCHESTRATOR-HANDOFF.md`](./docs/ORCHESTRATOR-HANDOFF.md) (multi-subagent local playbook).
 
 ## Standing rules (non-negotiable)
 
