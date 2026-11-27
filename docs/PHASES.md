@@ -210,8 +210,8 @@ Full: [08 §4](./08-implementation-plan.md#4-parallel-streams).
 
 ## Dave pre-code review (sign-off)
 
-- [ ] Phase order + gate table accepted  
-- [ ] HLE/LLE + dump policy accepted  
-- [ ] SemVer + family API accepted  
-- [ ] Hardest-parts list acknowledged (RSP/RDP/timing/TLB)  
-- [ ] **Coding authorized** (date / note): _______________
+- [x] Phase order + gate table accepted (working M0–M12 plan in [`DEVELOPMENT-PLAN.md`](./DEVELOPMENT-PLAN.md))  
+- [x] HLE/LLE + bespoke `EdgeWalker` Vulkan compute LLE RDP + dump policy accepted  
+- [x] SemVer + family API accepted  
+- [x] Hardest-parts list acknowledged (RSP/RDP/timing/TLB)  
+- [x] **Coding authorized** (date / note): **2026-11-27 — Dave approved working plan + M0 scaffold.**

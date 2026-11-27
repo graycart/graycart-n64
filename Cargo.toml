@@ -1,0 +1,32 @@
+[package]
+name = "graycart-n64"
+version = "0.0.1"
+edition = "2021"
+description = "Graycart Nintendo 64 emulator (library-first core + EdgeWalker Vulkan compute LLE RDP roadmap)"
+license = "MIT"
+repository = "https://github.com/graycart/graycart-n64"
+readme = "README.md"
+keywords = ["emulator", "n64", "nintendo-64", "mips", "vr4300"]
+categories = ["emulators"]
+
+[lib]
+name = "graycart_n64"
+path = "src/lib.rs"
+
+[[bin]]
+name = "graycart-n64"
+path = "src/main.rs"
+
+[features]
+# Default mode is strictly hardware-faithful LLE with zero GUI dependencies.
+default = []
+# Explicit, opt-in HLE paths (never enabled by default; always labeled).
+rsp-hle = []
+rdp-hle = []
+
+[dependencies]
+# Whole-machine state is serializable from M0 for deterministic savestates/rewind/replay.
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

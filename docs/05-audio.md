@@ -56,9 +56,13 @@ Provenance: [audio/n64brew-ai.md](./provenance/audio/n64brew-ai.md).
 - **IRQ fires when a transfer starts**, not when it ends — so games can prepare the next buffer in time.  
 - IRQ via **MI AI** bit; acknowledge by writing AI_STATUS.
 
-### Delayed-carry bug
+### Hardware DMA quirks (verifiable — replaces earlier "delayed-carry" label)
 
-If a transfer ends exactly on an **8 KiB (`0x2000`) page boundary**, HW may add `0x2000` to the **next** buffer address. libdragon documents a workaround. Emulators should **reproduce the bug** (accuracy) or offer a compatibility flag — default reproduce, document clearly.
+Two distinct AI hardware quirks plus a separate RSP audio-pipeline behavior must be modeled and tested independently (see [`DEVELOPMENT-PLAN.md`](./DEVELOPMENT-PLAN.md) §3.9):
+
+1. **Queued-DMA length latching bug (ares v129):** When a second buffer is queued while a first transfer is active, edge-case length/status latching behavior matters for titles such as *Twisted Edge* audio.
+2. **8 KiB (`0x2000`) boundary DMA address increment quirk (libdragon `audio.c` / n64brew):** If an AI DMA transfer ends exactly on an `0x2000`-byte boundary, hardware's internal address carry can advance the next DMA address by an extra `0x2000` bytes; libdragon explicitly works around this in software. Default accurate mode reproduces this behavior with a dedicated unit test.
+3. **RSP `VADDC` / 48-bit accumulator carry (separate subsystem):** Carry propagation in RSP vector audio microcodes belongs to [`03-rsp.md`](./03-rsp.md) (M4), not AI DMA.
 
 ---
 

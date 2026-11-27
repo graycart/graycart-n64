@@ -138,14 +138,14 @@ See [PHASES.md](./PHASES.md) for checkboxes. Narrative:
 
 ## 7. Acceptance criteria (Dave review gate)
 
-Copy to sign-off:
+Signed off via [`DEVELOPMENT-PLAN.md`](./DEVELOPMENT-PLAN.md) on **2026-11-27**:
 
-- [ ] Phase order + gates accepted (this file ↔ PHASES ↔ 07/11/12)  
-- [ ] HLE vs LLE policy accepted ([09](./09-graphics-plugin-accuracy.md))  
-- [ ] Dump/ROM policy accepted  
-- [ ] SemVer + family API direction accepted ([10](./10-family-api-and-reuse.md))  
-- [ ] Parallel stream ownership accepted  
-- [ ] Known TBD list accepted as non-blocking for P0–P2  
-- [ ] **Coding authorized** (date / note): _______________
+- [x] Phase order + gates accepted (amended to M0–M12 in [`DEVELOPMENT-PLAN.md`](./DEVELOPMENT-PLAN.md); research pack kept as hardware reference map)  
+- [x] HLE vs LLE + bespoke GPU policy accepted ([09](./09-graphics-plugin-accuracy.md) + bespoke `EdgeWalker` Vulkan compute LLE RDP, zero third-party RDP forks/FFI)  
+- [x] Dump/ROM & `THIRD_PARTY.md` license policy accepted  
+- [x] SemVer + family API direction accepted ([10](./10-family-api-and-reuse.md))  
+- [x] Parallel stream ownership & §5 Antigravity working agreement accepted  
+- [x] Known TBD list accepted as non-blocking for M0–M2  
+- [x] **Coding authorized** (date / note): **2026-11-27 — Dave approved working plan + M0 scaffold + bespoke `EdgeWalker` Vulkan compute LLE RDP & Two-Tier Enhancement roadmap.**
 
-**Status:** research pack ready for review — **no coding until accepted**.
+**Status:** Pre-code gate passed (2026-11-27) — active tracking in [`DEVELOPMENT-PLAN.md`](./DEVELOPMENT-PLAN.md) and [`STATUS.md`](../STATUS.md).

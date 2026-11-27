@@ -12,4 +12,8 @@ carts/
 /**/pif*.bin
 /**/cic*.bin
 /**/ipl*.bin
+# Reference study trees and fetch-only test suites (see THIRD_PARTY.md)
+/ref/
+/tests/fixtures/fetched/
 /target/
+
