@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "suite": "PeterLemon/N64",
+  "upstream": "https://github.com/PeterLemon/N64",
+  "license": "Unlicense",
+  "policy": "Curated hashed subset only; bundled bootcode bytes are excluded and treated as study-only (see THIRD_PARTY.md).",
+  "entries": [
+    {
+      "id": "cputest-add",
+      "category": "cpu",
+      "repo_path": "CPUTest/CPU/ADD/CPUADD.N64",
+      "sha256": "TBD_PIN_AT_M1_GATE",
+      "milestone": "M1"
+    },
+    {
+      "id": "rsptest-su",
+      "category": "rsp",
+      "repo_path": "RSPTest/CPU/ADD/RSPADD.N64",
+      "sha256": "TBD_PIN_AT_M3_GATE",
+      "milestone": "M3"
+    },
+    {
+      "id": "rdp-fill-rect",
+      "category": "rdp",
+      "repo_path": "RDP/FillRectangle/FillRectangle.N64",
+      "sha256": "TBD_PIN_AT_M5_GATE",
+      "milestone": "M5"
+    }
+  ]
+}
