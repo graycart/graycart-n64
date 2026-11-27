@@ -159,9 +159,9 @@ impl N64Core {
         self.scheduler.single_step_mode = self.config.single_step_mode;
         self.cpu.reset();
         if self.config.soft_boot {
-            // Soft-boot stub: copy up to 1 MiB from cart offset 0x1000 into RDRAM 0x0000_1000
-            // and seed the VR4300 PC to the header entry point (sign-extended 64-bit KSEG0/1).
-            self.bus.copy_cart_soft_boot();
+            // Soft-boot stub: copy up to 1 MiB from cart offset 0x1000 into RDRAM at
+            // (entry_pc & 0x1FFF_FFFF) and seed the VR4300 PC to the header entry point.
+            self.bus.copy_cart_soft_boot(entry_pc);
             self.cpu.set_pc(entry_pc as i32 as i64 as u64);
         } else {
             // Cold reset vector in KSEG1 PIF ROM space (0xBFC0_0000).

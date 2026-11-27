@@ -34,6 +34,12 @@ pub enum Trap {
     UnimplementedCop0Reg { pc: u64, reg: u8, is_write: bool },
     /// Unimplemented RDP command ID.
     UnimplementedRdpCommand { cmd_id: u8, word: u64 },
+    /// Architectural VR4300 exception surfaced before Wave B COP0 exception vectoring lands.
+    CpuException {
+        pc: u64,
+        code: &'static str,
+        bad_vaddr: Option<u64>,
+    },
 }
 
 impl fmt::Display for Trap {
@@ -77,6 +83,19 @@ impl fmt::Display for Trap {
                 f,
                 "unimplemented RDP command 0x{cmd_id:02X} (word 0x{word:016X})"
             ),
+            Self::CpuException {
+                pc,
+                code,
+                bad_vaddr: Some(vaddr),
+            } => write!(
+                f,
+                "CPU exception {code} at PC 0x{pc:016X} (BadVAddr 0x{vaddr:016X})"
+            ),
+            Self::CpuException {
+                pc,
+                code,
+                bad_vaddr: None,
+            } => write!(f, "CPU exception {code} at PC 0x{pc:016X}"),
         }
     }
 }

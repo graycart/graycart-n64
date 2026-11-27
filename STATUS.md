@@ -15,7 +15,7 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | Milestone | Status | Gate Receipt Summary |
 |---|---|---|
 | **M0 — Scaffold** | **Done** (PR #2 merged, CI green 3/3 OS) | 21 passed (15 unit, 3 CLI smoke, 3 ROM harness), 0 failed, 3 ignored matrix stubs compiled; fmt/clippy `-D warnings` clean; macOS/Ubuntu/Windows CI green; zero forbidden binaries tracked |
-| **M1 — CPU functional** | Ready (next) | See `docs/ORCHESTRATOR-HANDOFF.md` §4 for M1.0 seam + Wave A (5 parallel workers) + Wave B (4 parallel workers) |
+| **M1 — CPU functional** | **In Progress (`feat/m1-cpu` — M1.0 + Wave A done)** | 66 passed (59 unit, 3 CLI smoke, 4 ROM harness), 0 failed, 5 ignored; Wave A 5/5 integer ISA families implemented by parallel `flash_lite` workers & reviewed; next: Wave B (COP0/Exceptions, TLB, COP1 FPU, Caches) |
 | **M2 — Bus + boot** | Not started | — |
 | **M3 — RSP scalar + DMA** | Not started | — |
 | **M4 — RSP vector unit** | Not started | — |
@@ -29,6 +29,21 @@ Milestones advance only on pasted, verifiable test receipts reviewed by Dave.
 | **M12 — Optional dynarec + Family API extract** | Not started | — |
 
 ## Receipts
+
+### M1.0 + Wave A — VR4300 Integer ISA (`feat/m1-cpu`, 2026-11-27)
+
+- Orchestrator M1.0 seam (`src/cpu/{mod,mmu,exceptions,decode}.rs`, `src/bus/mod.rs` 16-bit + entry-PC soft-boot, `tests/roms/{harness,main}.rs` Dillonb `r30` sentinel + 26-ROM matrix + local cart probe) + 5 parallel `flash_lite` Wave A workers (`alu.rs`, `shift.rs`, `mult_div.rs`, `branch.rs`, `load_store.rs`).
+- Orchestrator review caught & fixed 3 hardware bugs before merge (`SH` misaligned `AdES`, `SDL`/`SDR` `shift == 0` full-overwrite mask) plus 2 test-file assertion fixes.
+- Local validation (Windows PowerShell, `RUST_MIN_STACK=16777216`):
+  - `cargo fmt --check` → exit `0`
+  - `cargo clippy --all-targets --all-features -- -D warnings` → exit `0` (0 lint warnings)
+  - `cargo test` → exit `0`:
+    - `src/lib.rs` unit tests: **59 passed; 0 failed; 0 ignored** (+44 new CPU unit tests across ALU, Shift, Mult/Div, Branch, Load/Store)
+    - `tests/cli_smoke.rs`: **3 passed; 0 failed; 0 ignored**
+    - `tests/roms/main.rs`: **4 passed; 0 failed; 5 ignored**
+- Fixture & local-cart progress probe:
+  - Dillonb `dillonb-simpleboot` (26 ROMs): `basic_simpleboot.z64` executed **66 instructions** to `VI` init trap (`0x0000`); remaining 25 ROMs executed **9 instructions** to `PI` DMA trap (`0x0000`) — zero CPU ISA failures.
+  - Local commercial smoke probe (8 carts, local-only): SM64 `115,041` insts → `MFC0 Status`; GoldenEye `125,537` insts → `MTC0 Index`; DK64 `15,230` insts → `MFC0 Status`; Majora's Mask `16,277` insts → `MFC0 Status`; OoT / MK64 / SSB ran `200,000` insts cleanly; Star Wars Racer `17` insts → `VI` write. Next: **M1 Wave B** (COP0/Exceptions, TLB, COP1, Cache).
 
 ### M0 — Scaffold (`feat/m0-scaffold` / PR #2, 2026-11-27)
 

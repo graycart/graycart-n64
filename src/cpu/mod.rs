@@ -1,7 +1,16 @@
-//! NEC VR4300 (MIPS III) CPU backend trait and interpreter shell.
+//! NEC VR4300 (MIPS III) CPU backend trait, interpreter state, and fetch/decode/execute loop.
 //!
-//! Cited: NEC VR4300, VR4305, VR4310 User's Manual (U10504EJ7V0UMJ1)
-//!   via docs/01-cpu-r4300i.md (M0 shell; full integer/COP0/TLB/COP1/cache land in M1).
+//! Cited: NEC VR4300, VR4305, VR4310 User's Manual (U10504EJ7V0UMJ1), Chapters 2, 5, 6, 16
+//!   via docs/01-cpu-r4300i.md · docs/ORCHESTRATOR-HANDOFF.md §4 (M1.0 seam)
+
+pub mod alu;
+pub mod branch;
+pub mod decode;
+pub mod exceptions;
+pub mod load_store;
+pub mod mmu;
+pub mod mult_div;
+pub mod shift;
 
 use serde::{Deserialize, Serialize};
 
@@ -9,42 +18,101 @@ use crate::bus::Bus;
 use crate::schedule::Scheduler;
 use crate::trap::Trap;
 
-/// Execution interface for VR4300 backends (`InterpCpu` is permanent accuracy reference).
+pub use exceptions::CpuException;
+
+/// Execution interface for VR4300 backends (`InterpCpu` is the permanent accuracy reference).
 pub trait CpuBackend {
     /// Execute a single instruction or slice step and return CPU cycles elapsed.
     fn step(&mut self, bus: &mut Bus, sched: &mut Scheduler) -> Result<u64, Trap>;
 }
 
-/// Pure-Rust VR4300 interpreter (scaffold shell for M0; M1 implements ISA/COP0/TLB/FPU/caches).
+/// Read-only core snapshot for CLI diagnostics and future Machine Monitor UI (`docs/13`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpuDebugSnapshot {
+    pub pc: u64,
+    pub next_pc: u64,
+    pub in_delay_slot: bool,
+    pub gpr: [u64; 32],
+    pub hi: u64,
+    pub lo: u64,
+    pub ll_bit: bool,
+    pub ll_addr: u32,
+    pub last_bad_vaddr: u64,
+    pub instructions_executed: u64,
+}
+
+/// Transient branch disposition set by `branch::exec_*` during a single instruction step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum BranchAction {
+    #[default]
+    None,
+    Taken(u64),
+    NotTaken,
+    NullifyDelaySlot,
+}
+
+/// Pure-Rust VR4300 interpreter (permanent CI accuracy oracle).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterpCpu {
-    /// Program counter (64-bit, sign-extended in 32-bit mode).
+    /// Program counter of the current instruction (64-bit, sign-extended in 32-bit mode).
     pc: u64,
+    /// Program counter of the next instruction (branch delay slot or sequential `pc + 4`).
+    next_pc: u64,
+    /// `true` while the instruction at `pc` is executing in a branch delay slot (`Cause.BD`).
+    in_delay_slot: bool,
     /// 32 general-purpose 64-bit registers (`gpr[0]` is hardwired to 0).
     gpr: [u64; 32],
     /// Multiply/divide accumulator registers.
     hi: u64,
     lo: u64,
+    /// Load-linked / store-conditional reservation flag (`LLBit`).
+    ll_bit: bool,
+    /// Physical address recorded by `LL`/`LLD` (`CP0 LLAddr` physical base).
+    ll_addr: u32,
+    /// Last faulting virtual address (mirroring `CP0 BadVAddr` until Wave B wires full COP0).
+    last_bad_vaddr: u64,
+    /// Total committed instructions executed since reset.
+    instructions_executed: u64,
+    /// Transient branch action recorded during `execute_instruction`.
+    #[serde(skip)]
+    pending_branch: BranchAction,
 }
 
 impl InterpCpu {
-    /// Create a newly reset VR4300 at the KSEG1 cold reset vector (`0xBFC0_0000`).
+    /// Cold reset vector in KSEG1 PIF ROM space (`0xFFFF_FFFF_BFC0_0000`).
+    pub const RESET_PC: u64 = 0xFFFF_FFFF_BFC0_0000;
+
+    /// Create a newly reset VR4300 at the KSEG1 cold reset vector.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            pc: 0xFFFF_FFFF_BFC0_0000,
+            pc: Self::RESET_PC,
+            next_pc: Self::RESET_PC.wrapping_add(4),
+            in_delay_slot: false,
             gpr: [0; 32],
             hi: 0,
             lo: 0,
+            ll_bit: false,
+            ll_addr: 0,
+            last_bad_vaddr: 0,
+            instructions_executed: 0,
+            pending_branch: BranchAction::None,
         }
     }
 
     /// Reset architectural registers to power-on state.
     pub fn reset(&mut self) {
-        self.pc = 0xFFFF_FFFF_BFC0_0000;
+        self.pc = Self::RESET_PC;
+        self.next_pc = Self::RESET_PC.wrapping_add(4);
+        self.in_delay_slot = false;
         self.gpr = [0; 32];
         self.hi = 0;
         self.lo = 0;
+        self.ll_bit = false;
+        self.ll_addr = 0;
+        self.last_bad_vaddr = 0;
+        self.instructions_executed = 0;
+        self.pending_branch = BranchAction::None;
     }
 
     #[must_use]
@@ -52,8 +120,22 @@ impl InterpCpu {
         self.pc
     }
 
+    #[must_use]
+    pub fn next_pc(&self) -> u64 {
+        self.next_pc
+    }
+
+    #[must_use]
+    pub fn in_delay_slot(&self) -> bool {
+        self.in_delay_slot
+    }
+
+    /// Directly set `pc` (clears delay-slot pipeline and sets `next_pc = pc + 4`).
     pub fn set_pc(&mut self, pc: u64) {
         self.pc = pc;
+        self.next_pc = pc.wrapping_add(4);
+        self.in_delay_slot = false;
+        self.pending_branch = BranchAction::None;
     }
 
     #[must_use]
@@ -70,6 +152,101 @@ impl InterpCpu {
             self.gpr[idx] = val;
         }
     }
+
+    #[must_use]
+    pub fn hi(&self) -> u64 {
+        self.hi
+    }
+
+    pub fn set_hi(&mut self, val: u64) {
+        self.hi = val;
+    }
+
+    #[must_use]
+    pub fn lo(&self) -> u64 {
+        self.lo
+    }
+
+    pub fn set_lo(&mut self, val: u64) {
+        self.lo = val;
+    }
+
+    #[must_use]
+    pub fn ll_bit(&self) -> bool {
+        self.ll_bit
+    }
+
+    pub fn set_ll_bit(&mut self, val: bool) {
+        self.ll_bit = val;
+    }
+
+    #[must_use]
+    pub fn ll_addr(&self) -> u32 {
+        self.ll_addr
+    }
+
+    pub fn set_ll_addr(&mut self, pa: u32) {
+        self.ll_addr = pa;
+    }
+
+    #[must_use]
+    pub fn last_bad_vaddr(&self) -> u64 {
+        self.last_bad_vaddr
+    }
+
+    #[must_use]
+    pub fn instructions_executed(&self) -> u64 {
+        self.instructions_executed
+    }
+
+    /// Capture a read-only debug snapshot for CLI telemetry or Machine Monitor UI.
+    #[must_use]
+    pub fn debug_snapshot(&self) -> CpuDebugSnapshot {
+        CpuDebugSnapshot {
+            pc: self.pc,
+            next_pc: self.next_pc,
+            in_delay_slot: self.in_delay_slot,
+            gpr: self.gpr,
+            hi: self.hi,
+            lo: self.lo,
+            ll_bit: self.ll_bit,
+            ll_addr: self.ll_addr,
+            last_bad_vaddr: self.last_bad_vaddr,
+            instructions_executed: self.instructions_executed,
+        }
+    }
+
+    /// Schedule a taken branch/jump: delay slot at `next_pc` executes next, then jumps to `target`.
+    pub fn take_branch(&mut self, target: u64) {
+        self.pending_branch = BranchAction::Taken(target);
+    }
+
+    /// Mark a non-likely branch as not taken: delay slot still executes with `in_delay_slot = true`.
+    pub fn not_taken_branch(&mut self) {
+        self.pending_branch = BranchAction::NotTaken;
+    }
+
+    /// Nullify the delay slot for a not-taken Branch Likely instruction (`pc` skips to `next_pc + 4`).
+    pub fn nullify_delay_slot(&mut self) {
+        self.pending_branch = BranchAction::NullifyDelaySlot;
+    }
+
+    /// Surface an architectural VR4300 exception.
+    ///
+    /// Updates `last_bad_vaddr` and clears `ll_bit` per VR4300 spec. In M1.0 / Wave A,
+    /// returns `Trap::CpuException` so unit tests assert exact exception codes without
+    /// stubbing; Wave B upgrades this seam to full COP0 exception vectoring.
+    pub fn raise_exception(&mut self, pc: u64, exc: CpuException) -> Trap {
+        self.ll_bit = false;
+        if let Some(vaddr) = exc.bad_vaddr() {
+            self.last_bad_vaddr = vaddr;
+        }
+        Trap::CpuException {
+            pc,
+            code: exc.short_name(),
+            bad_vaddr: exc.bad_vaddr(),
+        }
+    }
 }
 
 impl Default for InterpCpu {
@@ -79,11 +256,44 @@ impl Default for InterpCpu {
 }
 
 impl CpuBackend for InterpCpu {
-    fn step(&mut self, _bus: &mut Bus, _sched: &mut Scheduler) -> Result<u64, Trap> {
-        // Trap, don't stub (§5.1): M1 replaces this with real fetch/decode/execute.
-        Err(Trap::UnimplementedOpcode {
-            pc: self.pc,
-            word: 0,
-        })
+    fn step(&mut self, bus: &mut Bus, sched: &mut Scheduler) -> Result<u64, Trap> {
+        let cur_pc = self.pc;
+        let delay_slot_pc = self.next_pc;
+
+        let (pa, cache) = match mmu::translate_fetch_va(cur_pc) {
+            Ok(pair) => pair,
+            Err(exc) => return Err(self.raise_exception(cur_pc, exc)),
+        };
+        let word = bus.read_u32(pa, cache)?;
+
+        self.pending_branch = BranchAction::None;
+        let cycles = decode::execute_instruction(self, bus, sched, cur_pc, word)?;
+
+        self.instructions_executed = self.instructions_executed.saturating_add(1);
+        match self.pending_branch {
+            BranchAction::None => {
+                self.pc = delay_slot_pc;
+                self.next_pc = delay_slot_pc.wrapping_add(4);
+                self.in_delay_slot = false;
+            }
+            BranchAction::Taken(target) => {
+                self.pc = delay_slot_pc;
+                self.next_pc = target;
+                self.in_delay_slot = true;
+            }
+            BranchAction::NotTaken => {
+                self.pc = delay_slot_pc;
+                self.next_pc = delay_slot_pc.wrapping_add(4);
+                self.in_delay_slot = true;
+            }
+            BranchAction::NullifyDelaySlot => {
+                let resume = delay_slot_pc.wrapping_add(4);
+                self.pc = resume;
+                self.next_pc = resume.wrapping_add(4);
+                self.in_delay_slot = false;
+            }
+        }
+
+        Ok(cycles)
     }
 }

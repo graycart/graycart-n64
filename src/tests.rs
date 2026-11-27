@@ -28,12 +28,37 @@ fn core_state_roundtrips_via_serde() {
 
 #[test]
 fn unimplemented_cpu_step_traps_instead_of_stubbing() {
+    // Cold reset vector fetches from unimplemented PIF ROM (must trap, never return 0).
     let mut core = N64Core::new(N64Config::accurate());
-    let outcome = core.run_cycles(10);
+    let cold_outcome = core.run_cycles(10);
     assert!(matches!(
-        outcome,
+        cold_outcome,
         RunOutcome::Trapped {
-            trap: Trap::UnimplementedOpcode { .. },
+            trap: Trap::UnimplementedRegister {
+                device: "PIF_ROM",
+                ..
+            },
+            ..
+        }
+    ));
+
+    // Unimplemented instruction word in RDRAM must trap with UnimplementedOpcode.
+    let mut cfg = N64Config::accurate();
+    cfg.soft_boot = true;
+    let mut soft_core = N64Core::new(cfg);
+    soft_core
+        .bus
+        .write_u32(0x0000_1000, 0x7000_0000, CacheAttr::Uncached)
+        .unwrap();
+    soft_core.cpu.set_pc(0xFFFF_FFFF_8000_1000);
+    let opcode_outcome = soft_core.run_cycles(10);
+    assert!(matches!(
+        opcode_outcome,
+        RunOutcome::Trapped {
+            trap: Trap::UnimplementedOpcode {
+                pc: 0xFFFF_FFFF_8000_1000,
+                word: 0x7000_0000
+            },
             ..
         }
     ));

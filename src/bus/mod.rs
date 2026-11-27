@@ -172,9 +172,9 @@ impl Bus {
         self.cart = Some(cart);
     }
 
-    /// Copy up to 1 MiB from cart offset `0x1000` into RDRAM `0x0000_1000`
-    /// for young-CPU soft-boot test suites (e.g. Dillonb `n64-tests`).
-    pub fn copy_cart_soft_boot(&mut self) {
+    /// Copy up to 1 MiB from cart offset `0x1000` into RDRAM at `entry_pc & 0x1FFF_FFFF`
+    /// (matching IPL3's 1 MiB program load destination for soft-boot test suites).
+    pub fn copy_cart_soft_boot(&mut self, entry_pc: u32) {
         let Some(cart) = &self.cart else {
             return;
         };
@@ -182,10 +182,14 @@ impl Bus {
         if rom.len() <= 0x1000 {
             return;
         }
+        let dst_off = (entry_pc & 0x1FFF_FFFF) as usize;
+        if dst_off >= self.rdram.len() {
+            return;
+        }
         let available = (rom.len() - 0x1000).min(0x0010_0000);
-        let dst_cap = self.rdram.len().saturating_sub(0x1000);
+        let dst_cap = self.rdram.len().saturating_sub(dst_off);
         let copy_len = available.min(dst_cap);
-        self.rdram.as_mut_slice()[0x1000..0x1000 + copy_len]
+        self.rdram.as_mut_slice()[dst_off..dst_off + copy_len]
             .copy_from_slice(&rom[0x1000..0x1000 + copy_len]);
     }
 
@@ -257,6 +261,89 @@ impl Bus {
             }
             PhysRegion::PifRam => {
                 self.pif.ram[(pa - 0x1FC0_07C0) as usize] = val;
+                Ok(())
+            }
+            other => Err(self.unimplemented_region_trap(other, pa, true)),
+        }
+    }
+
+    /// Read a big-endian 16-bit halfword at physical address `pa`.
+    pub fn read_u16(&self, pa: u32, cache: CacheAttr) -> Result<u16, Trap> {
+        if pa & 1 != 0 {
+            return Err(Trap::MisalignedAccess { pa, size: 2 });
+        }
+        let region = self.check_access(pa, 2, false, cache)?;
+        match region {
+            PhysRegion::Rdram => self.rdram.read_u16(pa),
+            PhysRegion::RspDmem => {
+                let idx = (pa & 0x0FFF) as usize;
+                Ok(u16::from_be_bytes([
+                    self.sp_dmem[idx],
+                    self.sp_dmem[idx + 1],
+                ]))
+            }
+            PhysRegion::RspImem => {
+                let idx = (pa & 0x0FFF) as usize;
+                Ok(u16::from_be_bytes([
+                    self.sp_imem[idx],
+                    self.sp_imem[idx + 1],
+                ]))
+            }
+            PhysRegion::IsViewer => {
+                let off = pa - ISVIEWER_BASE;
+                Ok(u16::from_be_bytes([
+                    self.isviewer.read_u8(off),
+                    self.isviewer.read_u8(off + 1),
+                ]))
+            }
+            PhysRegion::CartRom => {
+                let offset = (pa - 0x1000_0000) as usize;
+                let rom = self.cart.as_ref().map(Cart::rom).unwrap_or(&[]);
+                if offset + 2 <= rom.len() {
+                    Ok(u16::from_be_bytes([rom[offset], rom[offset + 1]]))
+                } else {
+                    Ok(0)
+                }
+            }
+            PhysRegion::PifRam => {
+                let idx = (pa - 0x1FC0_07C0) as usize;
+                Ok(u16::from_be_bytes([
+                    self.pif.ram[idx],
+                    self.pif.ram[idx + 1],
+                ]))
+            }
+            other => Err(self.unimplemented_region_trap(other, pa, false)),
+        }
+    }
+
+    /// Write a big-endian 16-bit halfword at physical address `pa`.
+    pub fn write_u16(&mut self, pa: u32, val: u16, cache: CacheAttr) -> Result<(), Trap> {
+        if pa & 1 != 0 {
+            return Err(Trap::MisalignedAccess { pa, size: 2 });
+        }
+        let region = self.check_access(pa, 2, true, cache)?;
+        match region {
+            PhysRegion::Rdram => self.rdram.write_u16(pa, val),
+            PhysRegion::RspDmem => {
+                let idx = (pa & 0x0FFF) as usize;
+                self.sp_dmem[idx..idx + 2].copy_from_slice(&val.to_be_bytes());
+                Ok(())
+            }
+            PhysRegion::RspImem => {
+                let idx = (pa & 0x0FFF) as usize;
+                self.sp_imem[idx..idx + 2].copy_from_slice(&val.to_be_bytes());
+                Ok(())
+            }
+            PhysRegion::IsViewer => {
+                let off = pa - ISVIEWER_BASE;
+                let bytes = val.to_be_bytes();
+                self.isviewer.write_u8(off, bytes[0]);
+                self.isviewer.write_u8(off + 1, bytes[1]);
+                Ok(())
+            }
+            PhysRegion::PifRam => {
+                let idx = (pa - 0x1FC0_07C0) as usize;
+                self.pif.ram[idx..idx + 2].copy_from_slice(&val.to_be_bytes());
                 Ok(())
             }
             other => Err(self.unimplemented_region_trap(other, pa, true)),
