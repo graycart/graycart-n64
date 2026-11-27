@@ -1,0 +1,45 @@
+# Credits: adapted from graycart-gba `.github/workflows/ci.yml`
+#   https://github.com/graycart/graycart-gba/blob/main/.github/workflows/ci.yml
+# Policy + gates: docs/DEVELOPMENT-PLAN.md, docs/12-test-gates.md, AGENTS.md.
+#
+# Matrix: ubuntu-latest, macos-latest, windows-latest with fail-fast: false.
+# RUST_MIN_STACK prevents deep emulator test stacks from overflowing defaults.
+# Default CI MUST stay 100% ROM-free and dump-free — NEVER run `cargo test -- --ignored` here.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_MIN_STACK: "16777216"
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux audio/input/windowing dev libs
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config libxkbcommon-dev libwayland-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test (default ROM-free gate)
+        run: cargo test
+      - name: Verify ignored ROM harness compiles
+        run: cargo test --tests --no-run
