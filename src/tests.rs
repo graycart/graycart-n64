@@ -459,6 +459,8 @@ fn m5_0_bus_rdp_persistent_mmio_and_syncfull_mi_intr_dp() {
 ///
 /// The VI scanout frame hash and the raw framebuffer FNV (color bytes plus the
 /// 9th-bit window) are bit-exact, and the filled frame is not a blank scanout.
+/// Without `vulkan-rdp`, EdgeWalker has no compute device and `submit` traps.
+#[cfg(feature = "vulkan-rdp")]
 #[test]
 fn m6_edgewalker_matches_cpu_rdp_lle_fill_rectangle() {
     use crate::rdp::edgewalker::parity::{
@@ -480,5 +482,239 @@ fn m6_edgewalker_matches_cpu_rdp_lle_fill_rectangle() {
     assert_ne!(
         filled.raw_fb_fnv, blank.raw_fb_fnv,
         "FillRectangle must change the raw framebuffer FNV"
+    );
+}
+
+/// M7 end-to-end: real LLE RSP stereo mixer microcode (`InterpRsp` + SP DMA) ->
+/// RDRAM double-buffered AI DMA at ~44.1 kHz (`AI_DACRATE = 1102`) -> PCM ring
+/// -> bit-exact golden FNV-1a PCM hash, IRQ-on-start, live `AI_LEN` countdown,
+/// 48 kHz fixed-point resampling, and RIFF/WAVE encode.
+#[test]
+fn m7_rsp_audio_mixer_to_ai_double_buffer_golden_pcm_hash() {
+    use crate::ai::rsp_mixer::{
+        build_rsp_stereo_mixer_ucode, generate_pcm16_test_wave, load_stereo_mixer_inputs_to_dmem,
+        oracle_stereo_mix, upload_rsp_ucode,
+    };
+    use crate::ai::{encode_wav_pcm16_stereo, fnv1a_pcm_i16};
+    use crate::mi::MI_INTR_AI;
+    use crate::rsp::Sp;
+
+    let mut cfg = N64Config::accurate();
+    cfg.soft_boot = true;
+    let mut core = N64Core::with_cart(make_idle_cart(), cfg);
+
+    let gains = [24_576, 16_384, 8_192, -16_384];
+    let va0 = generate_pcm16_test_wave(64, 0x0400_0000, 16_000);
+    let vb0 = generate_pcm16_test_wave(64, 0x0700_0000, 12_000);
+    let va1 = generate_pcm16_test_wave(64, 0x0900_0000, 20_000);
+    let vb1 = generate_pcm16_test_wave(64, 0x0300_0000, 10_000);
+
+    let buf0_addr: u32 = 0x0001_0000;
+    let buf1_addr: u32 = 0x0001_2000;
+
+    // Pass 1: Run RSP stereo mixer microcode into RDRAM buffer 0 (256 bytes = 64 stereo frames)
+    load_stereo_mixer_inputs_to_dmem(&mut core.bus.sp_dmem, &va0, &vb0, gains);
+    upload_rsp_ucode(
+        &mut core.bus.sp_imem,
+        &build_rsp_stereo_mixer_ucode(8, buf0_addr),
+    );
+    core.bus
+        .write_u32(0x0408_0000, 0, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0404_0010, 1 << 0, CacheAttr::Uncached)
+        .unwrap();
+    assert!(matches!(
+        core.run_cycles(2_000),
+        RunOutcome::Completed { .. }
+    ));
+    assert!(core.bus.sp.is_halted());
+    assert_ne!(core.bus.sp.status & Sp::STATUS_BROKE, 0);
+
+    // Pass 2: Clear HALT & BROKE, run RSP stereo mixer microcode into RDRAM buffer 1
+    load_stereo_mixer_inputs_to_dmem(&mut core.bus.sp_dmem, &va1, &vb1, gains);
+    upload_rsp_ucode(
+        &mut core.bus.sp_imem,
+        &build_rsp_stereo_mixer_ucode(8, buf1_addr),
+    );
+    core.bus
+        .write_u32(0x0408_0000, 0, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0404_0010, (1 << 0) | (1 << 2), CacheAttr::Uncached)
+        .unwrap();
+    assert!(matches!(
+        core.run_cycles(2_000),
+        RunOutcome::Completed { .. }
+    ));
+    assert!(core.bus.sp.is_halted());
+    assert_ne!(core.bus.sp.status & Sp::STATUS_BROKE, 0);
+
+    // Enable MI_INTR_MASK.AI (bit 5 = set AI mask) and configure AI at ~44,135 Hz NTSC.
+    core.bus
+        .write_u32(0x0430_000C, 1 << 5, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0010, 1102, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0014, 15, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0008, 1, CacheAttr::Uncached)
+        .unwrap();
+    assert_eq!(core.audio_sample_rate_hz(), 44_135);
+
+    // Queue buffer 0 -> MI_INTR_AI must assert immediately on DMA start!
+    core.bus
+        .write_u32(0x0450_0000, buf0_addr, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0004, 256, CacheAttr::Uncached)
+        .unwrap();
+    assert_ne!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_AI,
+        0
+    );
+
+    // Acknowledge AI IRQ via AI_STATUS write, then queue buffer 1 (FIFO FULL, no immediate IRQ).
+    core.bus
+        .write_u32(0x0450_000C, 0, CacheAttr::Uncached)
+        .unwrap();
+    assert_eq!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_AI,
+        0
+    );
+    core.bus
+        .write_u32(0x0450_0000, buf1_addr, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0004, 256, CacheAttr::Uncached)
+        .unwrap();
+    let st_full = core.bus.read_u32(0x0450_000C, CacheAttr::Uncached).unwrap();
+    assert_ne!(st_full & (1 << 31), 0); // AI_FULL
+    assert_ne!(st_full & (1 << 30), 0); // AI_BUSY
+    assert_eq!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_AI,
+        0
+    );
+
+    // Advance past buffer 0 (~136k cycles): buffer 1 promotes -> raises MI_INTR_AI + decrements AI_LEN.
+    assert!(matches!(
+        core.run_cycles(150_000),
+        RunOutcome::Completed { .. }
+    ));
+    let mid_len = core.bus.read_u32(0x0450_0004, CacheAttr::Uncached).unwrap();
+    assert!(
+        mid_len > 0 && mid_len < 256,
+        "expected live countdown, got {mid_len}"
+    );
+    assert_ne!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_AI,
+        0
+    );
+
+    // Clear IRQ and drain buffer 1 completely.
+    core.bus
+        .write_u32(0x0450_000C, 0, CacheAttr::Uncached)
+        .unwrap();
+    assert!(matches!(
+        core.run_cycles(200_000),
+        RunOutcome::Completed { .. }
+    ));
+    assert_eq!(
+        core.bus.read_u32(0x0450_0004, CacheAttr::Uncached).unwrap(),
+        0
+    );
+    assert_eq!(
+        core.bus.read_u32(0x0450_000C, CacheAttr::Uncached).unwrap() & (1 << 30),
+        0
+    );
+    assert_eq!(
+        core.bus.read_u32(0x0430_0008, CacheAttr::Uncached).unwrap() & MI_INTR_AI,
+        0
+    );
+
+    let mut expected_oracle = oracle_stereo_mix(&va0, &vb0, gains);
+    expected_oracle.extend(oracle_stereo_mix(&va1, &vb1, gains));
+    let expected_hash = fnv1a_pcm_i16(&expected_oracle);
+
+    assert_eq!(core.audio_pcm_hash(), expected_hash);
+    assert_eq!(core.audio_telemetry().total_frames_produced, 128);
+
+    let mut pcm = Vec::new();
+    let drained_frames = core.drain_audio_i16(&mut pcm);
+    assert_eq!(drained_frames, 128);
+    assert_eq!(pcm, expected_oracle);
+
+    let wav =
+        encode_wav_pcm16_stereo(&pcm, core.audio_sample_rate_hz()).expect("valid RIFF/WAVE encode");
+    assert_eq!(&wav[0..4], b"RIFF");
+    assert_eq!(wav.len(), 44 + 512);
+
+    // Verify 48 kHz zero-float host resampling end-to-end on N64Core.
+    core.bus
+        .write_u32(0x0450_0000, buf0_addr, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0004, 256, CacheAttr::Uncached)
+        .unwrap();
+    assert!(matches!(
+        core.run_cycles(180_000),
+        RunOutcome::Completed { .. }
+    ));
+    let mut resampled = Vec::new();
+    let resampled_frames = core.drain_audio_resampled_i16(48_000, &mut resampled);
+    assert!(resampled_frames >= 64);
+    assert_eq!(resampled.len(), resampled_frames * 2);
+}
+
+/// M7 Quirk #2 end-to-end: an AI buffer ending on an 8 KiB (`0x2000`) boundary
+/// shifts the next queued buffer's DMA address by `+0x2000`.
+#[test]
+fn m7_ai_8k_boundary_delayed_carry_end_to_end() {
+    let mut cfg = N64Config::accurate();
+    cfg.soft_boot = true;
+    let mut core = N64Core::with_cart(make_idle_cart(), cfg);
+
+    // First buffer at 0x1FF8 (8 bytes -> ends at exact 0x2000 boundary)
+    core.bus.rdram.write_u32(0x1FF8, 0x0101_0202).unwrap();
+    core.bus.rdram.write_u32(0x1FFC, 0x0303_0404).unwrap();
+    // Trap value at 0x4000 vs true post-carry payload at 0x6000
+    core.bus.rdram.write_u32(0x4000, 0x7777_7777).unwrap();
+    core.bus.rdram.write_u32(0x4004, 0x7777_7777).unwrap();
+    core.bus.rdram.write_u32(0x6000, 0x1111_2222).unwrap();
+    core.bus.rdram.write_u32(0x6004, 0x3333_4444).unwrap();
+
+    core.bus
+        .write_u32(0x0450_0010, 200, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0008, 1, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0000, 0x0000_1FF8, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0004, 8, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0000, 0x0000_4000, CacheAttr::Uncached)
+        .unwrap();
+    core.bus
+        .write_u32(0x0450_0004, 8, CacheAttr::Uncached)
+        .unwrap();
+
+    assert!(matches!(
+        core.run_cycles(25_000),
+        RunOutcome::Completed { .. }
+    ));
+
+    let mut pcm = Vec::new();
+    let frames = core.drain_audio_i16(&mut pcm);
+    assert_eq!(frames, 4);
+    assert_eq!(
+        pcm,
+        vec![0x0101, 0x0202, 0x0303, 0x0404, 0x1111, 0x2222, 0x3333, 0x4444]
     );
 }

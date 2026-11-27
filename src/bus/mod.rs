@@ -19,7 +19,7 @@ use crate::cart::Cart;
 use crate::mi::{Mi, MI_INTR_AI, MI_INTR_DP, MI_INTR_PI, MI_INTR_SI, MI_INTR_SP, MI_INTR_VI};
 use crate::pi::{Pi, PiAction};
 use crate::pif::Pif;
-use crate::rdp::{CpuRdpLle, RdpAction};
+use crate::rdp::{regs, CpuRdpLle, EdgeWalker, RdpAction, RdpBackend, RdpBackendKind};
 use crate::ri::Ri;
 use crate::rsp::{Sp, SpAction, DMEM_SIZE, IMEM_SIZE};
 use crate::schedule::EventKind;
@@ -143,6 +143,12 @@ pub struct Bus {
     pub sp: Sp,
     /// RDP DPC/DPS MMIO (`0x0410_0000` / `0x0420_0000`). Single source of truth.
     pub rdp: CpuRdpLle,
+    /// Active RDP backend selector for DPC FIFO execution.
+    #[serde(default)]
+    pub rdp_backend: RdpBackendKind,
+    /// Standalone Vulkan compute LLE RDP instance when `rdp_backend == RdpBackendKind::EdgeWalker`.
+    #[serde(default)]
+    pub edgewalker: EdgeWalker,
     pub mi: Mi,
     pub vi: Vi,
     pub ai: Ai,
@@ -163,12 +169,23 @@ pub struct Bus {
 impl Bus {
     #[must_use]
     pub fn new(expansion_pak: bool, isviewer_enabled: bool) -> Self {
+        Self::with_rdp_backend(expansion_pak, isviewer_enabled, RdpBackendKind::CpuLle)
+    }
+
+    #[must_use]
+    pub fn with_rdp_backend(
+        expansion_pak: bool,
+        isviewer_enabled: bool,
+        rdp_backend: RdpBackendKind,
+    ) -> Self {
         Self {
             rdram: Rdram::new(expansion_pak),
             sp_dmem: vec![0; DMEM_SIZE],
             sp_imem: vec![0; IMEM_SIZE],
             sp: Sp::new(),
             rdp: CpuRdpLle::new(),
+            rdp_backend,
+            edgewalker: EdgeWalker::new(),
             mi: Mi::new(),
             vi: Vi::new(),
             ai: Ai::new(),
@@ -206,6 +223,15 @@ impl Bus {
     /// Complete an in-flight SP DMA (clears `SP_STATUS.DMA_BUSY`).
     pub fn complete_sp_dma(&mut self) {
         self.sp.complete_dma();
+    }
+
+    /// Consume one 8-byte (2 stereo sample) AI DMA burst into the PCM ring buffer.
+    pub fn step_ai_burst(&mut self) -> Option<u64> {
+        let out = self.ai.step_burst(&self.rdram);
+        if out.raise_intr {
+            self.mi.set_intr(MI_INTR_AI);
+        }
+        out.next_delay_cycles
     }
 
     /// Execute immediate-data Cart → RDRAM PI DMA copy (interrupt delayed per §3.3).
@@ -561,7 +587,18 @@ impl Bus {
             }
             PhysRegion::AiRegs => {
                 match self.ai.write_reg_action(pa & 0xFFFF, val)? {
-                    AiAction::StartDma { delay_cycles } => {
+                    AiAction::StartDma {
+                        raise_intr,
+                        delay_cycles,
+                    } => {
+                        if raise_intr {
+                            self.mi.set_intr(MI_INTR_AI);
+                        }
+                        if let Some(delay) = delay_cycles {
+                            self.pending_events.push((delay, EventKind::AiDmaStep));
+                        }
+                    }
+                    AiAction::ScheduleDma { delay_cycles } => {
                         self.pending_events
                             .push((delay_cycles, EventKind::AiDmaStep));
                     }
@@ -699,12 +736,36 @@ impl Bus {
             if words.is_empty() {
                 return Ok(());
             }
-            let action = {
-                let rdp = &mut self.rdp;
-                let rdram = &mut self.rdram;
-                rdp.submit_commands(&words, rdram)?
-            };
-            self.apply_rdp_action(action);
+            if self.rdp_backend == RdpBackendKind::CpuLle {
+                let action = {
+                    let rdp = &mut self.rdp;
+                    let rdram = &mut self.rdram;
+                    rdp.submit_commands(&words, rdram)?
+                };
+                self.apply_rdp_action(action);
+            } else {
+                self.edgewalker.submit(&words, &mut self.rdram)?;
+                let mut sync_full = false;
+                let mut idx = 0;
+                while idx < words.len() {
+                    let w = words[idx];
+                    let cmd = (w >> 56) & 0x3F;
+                    if cmd == 0x29 {
+                        sync_full = true;
+                    }
+                    let count = regs::command_word_count(w).max(1);
+                    idx += count;
+                }
+                if sync_full {
+                    self.rdp.dpc_status &= !(CpuRdpLle::STATUS_PIPE_BUSY
+                        | CpuRdpLle::STATUS_CMD_BUSY
+                        | CpuRdpLle::STATUS_TMEM_BUSY
+                        | CpuRdpLle::STATUS_START_GCLK
+                        | CpuRdpLle::STATUS_DMA_BUSY);
+                    self.apply_rdp_action(RdpAction::RaiseDpIntr);
+                }
+                self.rdp.complete_cmd_dma();
+            }
         }
         Ok(())
     }

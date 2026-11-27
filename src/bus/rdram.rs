@@ -72,6 +72,17 @@ impl Rdram {
         &mut self.data
     }
 
+    /// Raw bit-packed 9th-bit side array (`1` bit per RDRAM byte, LSB-first).
+    #[must_use]
+    pub fn hidden_bits_as_slice(&self) -> &[u8] {
+        &self.hidden_bits
+    }
+
+    /// Mutable bit-packed 9th-bit side array (`1` bit per RDRAM byte, LSB-first).
+    pub fn hidden_bits_as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.hidden_bits
+    }
+
     /// Read the 9th (hidden) bit for byte offset `addr`.
     ///
     /// Addresses past installed RDRAM return `false` (open bank).

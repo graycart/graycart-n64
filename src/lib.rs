@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 pub use bus::{Bus, CacheAttr, IsViewer, PhysRegion, Rdram};
 pub use cart::{Cart, CicType, RomError, RomFormat, RomHeader};
 pub use cpu::{CpuBackend, InterpCpu};
-pub use rdp::{CpuRdpLle, RdpBackend, RdpSyncKind};
+pub use rdp::{CpuRdpLle, EdgeWalker, RdpBackend, RdpBackendKind, RdpSyncKind};
 pub use rsp::{InterpRsp, RspBackend};
 pub use schedule::{CountClock, EventKind, ScheduledEvent, Scheduler};
 pub use trap::Trap;
@@ -77,6 +77,9 @@ pub struct N64Config {
     pub single_step_mode: bool,
     /// Enable the ISViewer debug cart window (`0x13FF_0000..=0x13FF_FFFF`).
     pub isviewer_enabled: bool,
+    /// Active RDP execution backend (`CpuLle` or `EdgeWalker`).
+    #[serde(default)]
+    pub rdp_backend: RdpBackendKind,
     /// Tier 2 opt-in enhancements (all stock/off in [`N64Config::accurate()`]).
     pub enhancements: EnhancementConfig,
 }
@@ -90,6 +93,7 @@ impl N64Config {
             soft_boot: false,
             single_step_mode: false,
             isviewer_enabled: true,
+            rdp_backend: RdpBackendKind::CpuLle,
             enhancements: EnhancementConfig::default(),
         }
     }
@@ -126,7 +130,11 @@ impl N64Core {
     pub fn new(config: N64Config) -> Self {
         let mut scheduler = Scheduler::new();
         scheduler.single_step_mode = config.single_step_mode;
-        let bus = Bus::new(config.expansion_pak, config.isviewer_enabled);
+        let bus = Bus::with_rdp_backend(
+            config.expansion_pak,
+            config.isviewer_enabled,
+            config.rdp_backend,
+        );
         Self {
             config,
             scheduler,
@@ -159,7 +167,9 @@ impl N64Core {
         self.cpu.reset();
         self.rsp.reset();
         self.bus.sp.reset();
+        self.bus.ai.reset();
         self.bus.rdp.reset();
+        self.bus.edgewalker = EdgeWalker::new();
         self.bus.pif.seed_boot_ram(cic);
         self.bus.pending_events.clear();
         self.bus.pending_pi_len = 0;
@@ -240,8 +250,7 @@ impl N64Core {
                                 self.scheduler.schedule_after(next_line, EventKind::ViLine);
                             }
                             EventKind::AiDmaStep => {
-                                self.bus.mi.set_intr(mi::MI_INTR_AI);
-                                if let Some(next_delay) = self.bus.ai.on_dma_complete() {
+                                if let Some(next_delay) = self.bus.step_ai_burst() {
                                     self.scheduler
                                         .schedule_after(next_delay, EventKind::AiDmaStep);
                                 }
@@ -288,5 +297,33 @@ impl N64Core {
     #[must_use]
     pub fn framebuffer_hash(&self) -> u64 {
         self.bus.vi.framebuffer_hash(&self.bus.rdram)
+    }
+
+    /// Current Audio Interface sample rate in Hz (`VI_clock / (AI_DACRATE + 1)`).
+    #[must_use]
+    pub fn audio_sample_rate_hz(&self) -> u32 {
+        self.bus.ai.sample_rate_hz()
+    }
+
+    /// Drain interleaved stereo `i16` PCM frames (`[L, R, ...]`) produced by AI DMA.
+    pub fn drain_audio_i16(&mut self, out: &mut Vec<i16>) -> usize {
+        self.bus.ai.drain_pcm_i16(out)
+    }
+
+    /// Drain AI PCM frames deterministically resampled to `host_rate_hz` (`[L, R, ...]`).
+    pub fn drain_audio_resampled_i16(&mut self, host_rate_hz: u32, out: &mut Vec<i16>) -> usize {
+        self.bus.ai.drain_pcm_resampled_i16(host_rate_hz, out)
+    }
+
+    /// Running deterministic FNV-1a 64-bit hash of all audio PCM samples produced so far.
+    #[must_use]
+    pub const fn audio_pcm_hash(&self) -> u64 {
+        self.bus.ai.pcm_hash()
+    }
+
+    /// Live AI audio ring telemetry (peaks, clipping, produced/dropped/underrun counts, hash).
+    #[must_use]
+    pub const fn audio_telemetry(&self) -> ai::AudioTelemetry {
+        self.bus.ai.telemetry()
     }
 }

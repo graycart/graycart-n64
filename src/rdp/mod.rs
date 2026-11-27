@@ -2,13 +2,12 @@
 //!
 //! Two 100%-bespoke Graycart LLE RDP implementations share [`RdpBackend`]:
 //! - [`CpuRdpLle`] (M5): pure-Rust software LLE reference (default in CI).
-//! - [`EdgeWalker`] (M6): Graycart's bespoke Vulkan compute LLE RDP.
+//! - [`EdgeWalker`] (M6): Graycart's standalone bespoke Vulkan compute LLE RDP
+//!   (written directly from N64 RDP hardware specs, zero CPU fallback; traps
+//!   when `vulkan-rdp` is disabled).
 //!   **M6 gate:** bit-exact frame hash EdgeWalker == CpuRdpLle.
-//!   The opt-in `vulkan-rdp` feature compiles the compute-device seam. Until
-//!   shaders land, [`EdgeWalker`] `submit` / `sync` stay on the deterministic
-//!   CPU path so default CI remains GPU-free and bit-exact. M11 enhancements
-//!   (upscaling, SSAA, widescreen, VI/CRT filters, Oracle Lens, Live Frame
-//!   Inspector) stay behind `EnhancementConfig`.
+//!   M11 enhancements (upscaling, SSAA, widescreen, VI/CRT filters, Oracle
+//!   Lens, Live Frame Inspector) stay behind `EnhancementConfig`.
 //!
 //! Cited: N64brew — Reality Display Processor / Interface
 //!   https://n64brew.dev/wiki/Reality_Display_Processor
@@ -39,6 +38,16 @@ pub enum RdpSyncKind {
     Tile,
     Load,
     Full,
+}
+
+/// Active RDP execution backend behind [`crate::bus::Bus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RdpBackendKind {
+    /// Pure-Rust software LLE reference ([`CpuRdpLle`]).
+    #[default]
+    CpuLle,
+    /// Bespoke Vulkan compute LLE ([`EdgeWalker`]).
+    EdgeWalker,
 }
 
 /// Side effects [`crate::bus::Bus`] applies after a DPC/DPS write or `SyncFull`.

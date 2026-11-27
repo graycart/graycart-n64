@@ -13,6 +13,9 @@ pub mod vu_logic_cmp;
 pub mod vu_lsu;
 pub mod vu_recip;
 
+#[cfg(test)]
+mod vu_audio_tests;
+
 use serde::{Deserialize, Serialize};
 
 use crate::bus::Bus;
